@@ -14,10 +14,11 @@ import (
 )
 
 type Config struct {
-	ApiKey  string
-	BaseURL string
-	Model   string
-	Editor  string
+	ApiKey             string
+	BaseURL            string
+	Model              string
+	Editor             string
+	SystemInstructions string
 }
 
 const (
@@ -67,10 +68,11 @@ func main() {
 
 func loadConfig() Config {
 	c := Config{
-		ApiKey:  os.Getenv("AI_API_KEY"),
-		BaseURL: os.Getenv("AI_API_BASE_URL"),
-		Model:   os.Getenv("AI_API_MODEL"),
-		Editor:  os.Getenv("EDITOR"),
+		ApiKey:             os.Getenv("AI_API_KEY"),
+		BaseURL:            os.Getenv("AI_API_BASE_URL"),
+		Model:              os.Getenv("AI_API_MODEL"),
+		Editor:             os.Getenv("EDITOR"),
+		SystemInstructions: os.Getenv("AI_SYSTEM_INSTRUCTIONS"),
 	}
 
 	if c.Model == "" {
@@ -145,9 +147,6 @@ func openEditor(editor string) (string, error) {
 	cmd := exec.Command(editor, tmpFile.Name())
 
 	// IMPORTANT: Editor needs to interact with the real terminal, not the piped stdin/stdout
-	// We map to /dev/tty or ensure we are using the real console FDs if possible.
-	// In most cases, mapping to os.Stdin/os.Stdout works fine for interactive processes,
-	// even if os.Stdin is piped, provided the terminal is still accessible.
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -174,15 +173,24 @@ func streamCompletion(cfg Config, prompt string) error {
 	client := openai.NewClientWithConfig(config)
 	ctx := context.Background()
 
+	messages := make([]openai.ChatCompletionMessage, 0)
+
+	if strings.TrimSpace(cfg.SystemInstructions) != "" {
+		messages = append(messages, openai.ChatCompletionMessage{
+			Role:    openai.ChatMessageRoleSystem,
+			Content: cfg.SystemInstructions,
+		})
+	}
+
+	messages = append(messages, openai.ChatCompletionMessage{
+		Role:    openai.ChatMessageRoleUser,
+		Content: prompt,
+	})
+
 	req := openai.ChatCompletionRequest{
-		Model: cfg.Model,
-		Messages: []openai.ChatCompletionMessage{
-			{
-				Role:    openai.ChatMessageRoleUser,
-				Content: prompt,
-			},
-		},
-		Stream: true,
+		Model:    cfg.Model,
+		Messages: messages,
+		Stream:   true,
 	}
 
 	stream, err := client.CreateChatCompletionStream(ctx, req)
