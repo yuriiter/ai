@@ -21,13 +21,27 @@ type Config struct {
 	SystemInstructions string
 }
 
-const (
+var (
 	ColorRed   = "\033[31m"
 	ColorGreen = "\033[32m"
 	ColorReset = "\033[0m"
 )
 
+func isStdoutTTY() bool {
+	stat, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return (stat.Mode() & os.ModeCharDevice) != 0
+}
+
 func main() {
+	if !isStdoutTTY() {
+		ColorRed = ""
+		ColorGreen = ""
+		ColorReset = ""
+	}
+
 	var editorFlag bool
 
 	var rootCmd = &cobra.Command{
