@@ -43,6 +43,7 @@ func main() {
 	}
 
 	var editorFlag bool
+	var streamingFlag bool
 
 	var rootCmd = &cobra.Command{
 		Use:   "ai [prompt...]",
@@ -65,7 +66,7 @@ func main() {
 				os.Exit(0)
 			}
 
-			if err := streamCompletion(config, prompt); err != nil {
+			if err := runCompletion(config, prompt, streamingFlag); err != nil {
 				fmt.Fprintf(os.Stderr, "\n%sAPI Error: %v%s\n", ColorRed, err, ColorReset)
 				os.Exit(1)
 			}
@@ -73,6 +74,7 @@ func main() {
 	}
 
 	rootCmd.Flags().BoolVarP(&editorFlag, "editor", "e", false, "Open editor to compose prompt")
+	rootCmd.Flags().BoolVarP(&streamingFlag, "streaming", "s", false, "Use streaming output")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "%s%v%s\n", ColorRed, err, ColorReset)
@@ -136,14 +138,11 @@ func gatherInput(args []string, useEditor bool, editorCmd string) (string, error
 			return "", err
 		}
 
-		// If initialContent came from args or pipe, combine it with editor output.
-		// If the editor output is the only content, use it directly.
 		if strings.TrimSpace(initialContent) != "" && strings.TrimSpace(editorOutput) != "" {
 			initialContent = fmt.Sprintf("%s\n\n---\n%s", initialContent, editorOutput)
 		} else if strings.TrimSpace(editorOutput) != "" {
 			initialContent = editorOutput
 		}
-		// If both are empty, initialContent remains empty.
 	}
 
 	return initialContent, nil
@@ -160,7 +159,6 @@ func openEditor(editor string) (string, error) {
 
 	cmd := exec.Command(editor, tmpFile.Name())
 
-	// IMPORTANT: Editor needs to interact with the real terminal, not the piped stdin/stdout
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -177,7 +175,7 @@ func openEditor(editor string) (string, error) {
 	return string(finalBytes), nil
 }
 
-func streamCompletion(cfg Config, prompt string) error {
+func runCompletion(cfg Config, prompt string, isStreaming bool) error {
 	config := openai.DefaultConfig(cfg.ApiKey)
 
 	if cfg.BaseURL != "" {
@@ -204,29 +202,44 @@ func streamCompletion(cfg Config, prompt string) error {
 	req := openai.ChatCompletionRequest{
 		Model:    cfg.Model,
 		Messages: messages,
-		Stream:   true,
+		Stream:   isStreaming,
 	}
 
-	stream, err := client.CreateChatCompletionStream(ctx, req)
+	if isStreaming {
+		stream, err := client.CreateChatCompletionStream(ctx, req)
+		if err != nil {
+			return err
+		}
+		defer stream.Close()
+
+		fmt.Print(ColorGreen)
+
+		for {
+			response, err := stream.Recv()
+			if errors.Is(err, io.EOF) {
+				fmt.Print(ColorReset)
+				fmt.Println()
+				return nil
+			}
+			if err != nil {
+				fmt.Print(ColorReset)
+				return err
+			}
+
+			fmt.Print(response.Choices[0].Delta.Content)
+		}
+	}
+
+	resp, err := client.CreateChatCompletion(ctx, req)
 	if err != nil {
 		return err
 	}
-	defer stream.Close()
 
 	fmt.Print(ColorGreen)
-
-	for {
-		response, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			fmt.Print(ColorReset)
-			fmt.Println()
-			return nil
-		}
-		if err != nil {
-			fmt.Print(ColorReset)
-			return err
-		}
-
-		fmt.Print(response.Choices[0].Delta.Content)
+	if len(resp.Choices) > 0 {
+		fmt.Print(resp.Choices[0].Message.Content)
 	}
+	fmt.Println(ColorReset)
+
+	return nil
 }
