@@ -85,8 +85,8 @@ func main() {
 func loadConfig() Config {
 	c := Config{
 		ApiKey:             os.Getenv("AI_API_KEY"),
-		BaseURL:            os.Getenv("AI_API_BASE_URL"),
-		Model:              os.Getenv("AI_API_MODEL"),
+		BaseURL:            os.Getenv("AI_BASE_URL"),
+		Model:              os.Getenv("AI_MODEL"),
 		Editor:             os.Getenv("EDITOR"),
 		SystemInstructions: os.Getenv("AI_SYSTEM_INSTRUCTIONS"),
 	}
