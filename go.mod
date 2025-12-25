@@ -1,4 +1,4 @@
-module ai
+module github.com/yuriiter/ai
 
 go 1.25.1
 

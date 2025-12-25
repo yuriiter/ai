@@ -15,18 +15,10 @@
 
 You need Go (1.18+) installed to build the tool.
 
-### Build and Install
+### Install
 
 ```bash
-# Clone the repository (assuming this code is saved in a repo)
-# git clone <repo-url>
-# cd <repo-dir>
-
-# Build the executable
-go build -o ai .
-
-# Move the executable to a directory in your PATH (e.g., /usr/local/bin)
-sudo mv ai /usr/local/bin/
+go install github.com/yuriiter/ai@latest
 ```
 
 ## Configuration
