@@ -1,19 +1,22 @@
 # AI CLI Tool
 
-`ai` is a simple, powerful command-line interface tool for interacting with OpenAI-compatible APIs (like OpenAI, Azure, or self-hosted models). It supports streaming, configuration via environment variables, and flexible input handling (arguments, stdin piping, and editor integration).
+`ai` is a powerful, extensible command-line interface for interacting with OpenAI-compatible APIs. Beyond simple prompting, it features a full **Agentic Mode** with support for the **Model Context Protocol (MCP)**, allowing the AI to use tools, interact with your filesystem, and connect to external servers.
 
 ## Features
 
-*   **API Compatibility:** Works with any API endpoint supported by the `go-openai` library.
-*   **Flexible Input:** Get prompts from arguments, piped content, or an external editor.
-*   **System Instructions:** Configure the AI's personality or instructions using an environment variable.
-*   **Streaming Output:** Get responses in real-time directly to your terminal.
+*   **Agentic Capabilities:** Enable the AI to perform multi-step tasks using tools (`-a` flag).
+*   **MCP Support:** Connect to any [Model Context Protocol](https://modelcontextprotocol.io/) server to give the AI access to local resources (databases, filesystems, etc.).
+*   **Interactive Chat:** specific interactive mode (`-i`) for conversational workflows.
+*   **Flexible Input:** Standard input (stdin) piping, command-line arguments, and external editor integration (`-e`).
+*   **Customizable:** Configure models, temperature, and system instructions via environment variables or flags.
 
 ## Installation
 
 ### Prerequisites
 
-You need Go (1.18+) installed to build the tool.
+*   Go 1.21+
+*   An OpenAI API Key (or compatible provider).
+*   (Optional) `npx` or other runtimes if you plan to use specific MCP servers.
 
 ### Install
 
@@ -23,83 +26,80 @@ go install github.com/yuriiter/ai@latest
 
 ## Configuration
 
-The tool relies entirely on environment variables for configuration.
+The tool uses environment variables for default configuration.
 
 | Environment Variable | Description | Default |
 | :--- | :--- | :--- |
-| `AI_API_KEY` | **Required.** Your API key (e.g., OpenAI API Key). | None |
-| `AI_API_BASE_URL` | Optional. The base URL for the API endpoint (useful for services other than OpenAI). | `https://api.openai.com/v1` |
-| `AI_API_MODEL` | Optional. The specific model to use for chat completion. | `gpt-3.5-turbo` |
-| `AI_SYSTEM_INSTRUCTIONS` | Optional. A system prompt to guide the AI's behavior and personality for every request. | None |
-| `EDITOR` | Optional. The command to launch your preferred text editor (used with the `-e` flag). | `vim`, `nano`, or `vi` |
-
-### Example Setup
-
-You should set these variables in your shell configuration (`.bashrc`, `.zshrc`, etc.) or export them for the current session.
-
-```bash
-export AI_API_KEY="sk-..."
-export AI_API_MODEL="gpt-4o"
-export AI_SYSTEM_INSTRUCTIONS="You are a helpful assistant who always answers in concise, markdown-formatted bullet points."
-```
+| `OPENAI_API_KEY` | **Required.** Your API key. | None |
+| `OPENAI_BASE_URL` | Optional. Base URL for the API (useful for Ollama, Azure, etc.). | `https://api.openai.com/v1` |
+| `OPENAI_MODEL` | Optional. The specific model to use. | `gpt-4o` |
+| `OPENAI_SYSTEM_INSTRUCTIONS` | Optional. Default system prompt/persona. | Built-in helper persona |
+| `OPENAI_TEMPERATURE` | Optional. Default temperature (creativity). | `1.0` |
+| `EDITOR` | Optional. Editor for the `-e` flag. | `vim`, `nano`, or `vi` |
 
 ## Usage
 
-The primary usage is simply providing a prompt as command arguments.
+### Basic Prompting
+Just like `echo`, you can pass arguments directly:
 
 ```bash
-ai Explain the concept of monads in functional programming
+ai Explain the concept of recursion
 ```
 
-### Input Methods
-
-#### 1. Arguments
-
-The simplest way is passing the prompt directly:
+### Interactive Mode
+Start a chat session with memory:
 
 ```bash
-ai Write a Python function to reverse a string
+ai -im
 ```
 
-#### 2. Stdin Piping
+### Agentic Mode & MCP (Model Context Protocol)
+The real power of `ai` comes from connecting it to MCP servers. This allows the AI to "do" things rather than just talk.
 
-You can pipe content from other commands into `ai`. This is ideal for analyzing files or code snippets.
+To use tools, you must enable agent mode (`-a`) and provide an MCP server command (`--mcp`).
+
+**Example: Giving the AI access to your filesystem**
+(Requires `npx` installed)
 
 ```bash
-cat my_script.py | ai Review this Python script for security vulnerabilities
+ai -a --mcp "npx -y @modelcontextprotocol/server-filesystem ." \
+   "Read the file 'main.go' and tell me what the package name is"
 ```
 
-You can combine a prompt argument with piped data:
+You can chain multiple MCP servers:
 
 ```bash
-ls -l | ai Analyze the output below and summarize the file permissions
+ai -a \
+   --mcp "npx -y @modelcontextprotocol/server-filesystem ." \
+   --mcp "python3 my_custom_server.py" \
+   "Analyze my files and upload the summary to my custom server"
 ```
 
-#### 3. Editor Mode (`-e`)
-
-Use the `-e` or `--editor` flag to launch your configured external editor (defined by `$EDITOR` or the default). This is useful for writing multi-line or complex prompts.
+### Using the Editor
+Use `-e` to open your default text editor (Vim/Nano) to compose complex prompts. If you pipe data in, it will appear in the editor for you to annotate.
 
 ```bash
-ai -e
+git diff | ai -e
+# Opens editor with the diff, letting you add: "Write a commit message for these changes"
 ```
 
-If you provide arguments or pipe data *along with* the `-e` flag, that content will be pre-pended to the editor's output, allowing you to give instructions and elaborate on the piped content inside the editor.
+### Flags Reference
 
-### Example: Using System Instructions
-
-If you have configured `AI_SYSTEM_INSTRUCTIONS` (e.g., set to make the AI a pirate), the command will automatically follow those instructions:
-
-```bash
-# Assuming AI_SYSTEM_INSTRUCTIONS="You are a friendly pirate. Format your message with ANSI"
-ai Tell me about the weather
-
-# Colorful terminal output: "Arrr, the skies be clear, captain! Perfect weather for sailing the high seas!"
-```
+| Flag | Short | Description |
+| :--- | :--- | :--- |
+| `--agent` | `-a` | Enable agentic capabilities (required for MCP tools). |
+| `--interactive` | `-i` | Start interactive chat mode. |
+| `--mcp` | | Command to start an MCP server (can be used multiple times). |
+| `--editor` | `-e` | Open editor to compose prompt. |
+| `--memory` | `-m` | Retain conversation history between turns (useful in scripts). |
+| `--steps` | | Maximum number of agentic steps allowed (default: 10). |
+| `--temperature` | `-t` | Set model temperature (0.0 - 2.0). |
 
 ## Development
 
-The tool is written in Go. If you modify the source code, you can rebuild it using:
+1. Clone the repository.
+2. Build the binary:
 
 ```bash
-go build -o ai
+go build -o ai main.go
 ```
