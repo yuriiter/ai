@@ -3,6 +3,7 @@ package rag
 import (
 	"archive/zip"
 	"context"
+	"encoding/gob"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/ledongthuc/pdf"
 	"github.com/nlpodyssey/cybertron/pkg/models/bert"
@@ -32,22 +34,34 @@ type OpenAIEmbedder struct {
 }
 
 func (o *OpenAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
-	resp, err := o.client.CreateEmbeddings(ctx, openai.EmbeddingRequest{
-		Input: texts,
-		Model: openai.EmbeddingModel(o.model),
-	})
-	if err != nil {
-		return nil, err
+	const maxBatchSize = 2048
+	var allResults [][]float32
+
+	for i := 0; i < len(texts); i += maxBatchSize {
+		end := i + maxBatchSize
+		if end > len(texts) {
+			end = len(texts)
+		}
+		batch := texts[i:end]
+
+		resp, err := o.client.CreateEmbeddings(ctx, openai.EmbeddingRequest{
+			Input: batch,
+			Model: openai.EmbeddingModel(o.model),
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		for _, d := range resp.Data {
+			allResults = append(allResults, d.Embedding)
+		}
 	}
-	var res [][]float32
-	for _, d := range resp.Data {
-		res = append(res, d.Embedding)
-	}
-	return res, nil
+	return allResults, nil
 }
 
 type LocalEmbedder struct {
 	interfaceModel textencoding.Interface
+	mu             sync.Mutex
 }
 
 func NewLocalEmbedder() (*LocalEmbedder, error) {
@@ -55,7 +69,7 @@ func NewLocalEmbedder() (*LocalEmbedder, error) {
 
 	model, err := tasks.Load[textencoding.Interface](&tasks.Config{
 		ModelsDir: filepath.Join(os.Getenv("HOME"), ".cybertron"),
-		ModelName: "sentence-transformers/all-MiniLM-L6-v2",
+		ModelName: "sentence-transformers/paraphrase-MiniLM-L3-v2",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to load local model: %w", err)
@@ -64,16 +78,57 @@ func NewLocalEmbedder() (*LocalEmbedder, error) {
 }
 
 func (l *LocalEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
-	var results [][]float32
-	for _, text := range texts {
-		output, err := l.interfaceModel.Encode(ctx, text, int(bert.MeanPooling))
-		if err != nil {
-			return nil, err
-		}
+	results := make([][]float32, len(texts))
 
-		vec := output.Vector.Data().F32()
-		results = append(results, vec)
+	numWorkers := 4
+	if len(texts) < numWorkers {
+		numWorkers = len(texts)
 	}
+
+	type job struct {
+		index int
+		text  string
+	}
+
+	jobs := make(chan job, len(texts))
+	errors := make(chan error, numWorkers)
+	var wg sync.WaitGroup
+
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				output, err := l.interfaceModel.Encode(ctx, j.text, int(bert.MeanPooling))
+				if err != nil {
+					select {
+					case errors <- err:
+					default:
+					}
+					return
+				}
+
+				vec := output.Vector.Data().F32()
+
+				l.mu.Lock()
+				results[j.index] = vec
+				l.mu.Unlock()
+			}
+		}()
+	}
+
+	for i, text := range texts {
+		jobs <- job{index: i, text: text}
+	}
+	close(jobs)
+
+	wg.Wait()
+	close(errors)
+
+	if err := <-errors; err != nil {
+		return nil, err
+	}
+
 	return results, nil
 }
 
@@ -81,6 +136,14 @@ type Chunk struct {
 	Text     string
 	Filename string
 	Vector   []float32
+}
+
+type EmbeddingCache struct {
+	Chunks      []Chunk
+	GlobPattern string
+	Provider    string
+	Model       string
+	Version     int
 }
 
 type Engine struct {
@@ -108,6 +171,67 @@ func New(client *openai.Client, configProvider string, configModel string) (*Eng
 	}, nil
 }
 
+func (e *Engine) SaveEmbeddings(filepath string, globPattern string, provider string, model string) error {
+	cache := EmbeddingCache{
+		Chunks:      e.Chunks,
+		GlobPattern: globPattern,
+		Provider:    provider,
+		Model:       model,
+		Version:     1,
+	}
+
+	file, err := os.Create(filepath)
+	if err != nil {
+		return fmt.Errorf("failed to create cache file: %w", err)
+	}
+	defer file.Close()
+
+	encoder := gob.NewEncoder(file)
+	if err := encoder.Encode(cache); err != nil {
+		return fmt.Errorf("failed to encode cache: %w", err)
+	}
+
+	fmt.Printf("%sEmbeddings saved to %s (%d chunks)%s\n", ui.ColorGreen, filepath, len(e.Chunks), ui.ColorReset)
+	return nil
+}
+
+func (e *Engine) LoadEmbeddings(filepath string) error {
+	file, err := os.Open(filepath)
+	if err != nil {
+		return fmt.Errorf("failed to open cache file: %w", err)
+	}
+	defer file.Close()
+
+	var cache EmbeddingCache
+	decoder := gob.NewDecoder(file)
+	if err := decoder.Decode(&cache); err != nil {
+		return fmt.Errorf("failed to decode cache: %w", err)
+	}
+
+	e.Chunks = cache.Chunks
+	fmt.Printf("%sLoaded %d cached embeddings from %s%s\n", ui.ColorGreen, len(e.Chunks), filepath, ui.ColorReset)
+	fmt.Printf("%s  Pattern: %s | Provider: %s | Model: %s%s\n",
+		ui.ColorBlue, cache.GlobPattern, cache.Provider, cache.Model, ui.ColorReset)
+
+	return nil
+}
+
+func (e *Engine) CacheExists(filepath string) bool {
+	_, err := os.Stat(filepath)
+	return err == nil
+}
+
+func GetDefaultCachePath(globPattern string) string {
+	safe := strings.ReplaceAll(globPattern, "/", "_")
+	safe = strings.ReplaceAll(safe, "*", "all")
+	safe = strings.ReplaceAll(safe, ".", "_")
+
+	cacheDir := filepath.Join(os.Getenv("HOME"), ".cache", "ai-rag")
+	os.MkdirAll(cacheDir, 0755)
+
+	return filepath.Join(cacheDir, fmt.Sprintf("embeddings_%s.gob", safe))
+}
+
 func (e *Engine) IngestGlob(ctx context.Context, globPattern string) error {
 	files := findFiles(globPattern)
 	if len(files) == 0 {
@@ -122,9 +246,10 @@ func (e *Engine) IngestGlob(ctx context.Context, globPattern string) error {
 		Filename string
 	}
 
-	for _, file := range files {
+	for i, file := range files {
 		content, err := extractText(file)
 		if err != nil {
+			fmt.Printf("\rSkipping %s: %v", file, err)
 			continue
 		}
 		if strings.TrimSpace(content) == "" {
@@ -139,7 +264,9 @@ func (e *Engine) IngestGlob(ctx context.Context, globPattern string) error {
 				Filename string
 			}{Text: c, Filename: file})
 		}
+		fmt.Printf("\rProcessed %d/%d files...", i+1, len(files))
 	}
+	fmt.Println()
 
 	if len(textsToEmbed) == 0 {
 		return fmt.Errorf("no text content extracted")
@@ -147,7 +274,8 @@ func (e *Engine) IngestGlob(ctx context.Context, globPattern string) error {
 
 	fmt.Printf("Generating embeddings for %d chunks...\n", len(textsToEmbed))
 
-	batchSize := 20
+	batchSize := 100
+
 	for i := 0; i < len(textsToEmbed); i += batchSize {
 		end := i + batchSize
 		if end > len(textsToEmbed) {
@@ -168,7 +296,9 @@ func (e *Engine) IngestGlob(ctx context.Context, globPattern string) error {
 				Vector:   vec,
 			})
 		}
-		fmt.Printf(".")
+
+		progress := float64(end) / float64(len(textsToEmbed)) * 100
+		fmt.Printf("\rProgress: %.1f%% (%d/%d chunks)", progress, end, len(textsToEmbed))
 	}
 	fmt.Println("\nDone.")
 

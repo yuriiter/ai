@@ -96,7 +96,28 @@ func (a *Agent) InitializeRAG(ctx context.Context) error {
 	if a.config.RagGlob == "" {
 		return nil
 	}
-	return a.RagEngine.IngestGlob(ctx, a.config.RagGlob)
+
+	cachePath := rag.GetDefaultCachePath(a.config.RagGlob)
+
+	if a.RagEngine.CacheExists(cachePath) {
+		fmt.Printf("%sFound embedding cache, loading...%s\n", ui.ColorBlue, ui.ColorReset)
+		if err := a.RagEngine.LoadEmbeddings(cachePath); err != nil {
+			fmt.Printf("%sCache load failed: %v, regenerating...%s\n", ui.ColorRed, err, ui.ColorReset)
+		} else {
+			return nil
+		}
+	}
+
+	fmt.Printf("%sNo cache found, generating embeddings...%s\n", ui.ColorBlue, ui.ColorReset)
+	if err := a.RagEngine.IngestGlob(ctx, a.config.RagGlob); err != nil {
+		return err
+	}
+
+	if err := a.RagEngine.SaveEmbeddings(cachePath, a.config.RagGlob, a.config.EmbeddingProvider, a.config.EmbeddingModel); err != nil {
+		fmt.Printf("%sWarning: Failed to save cache: %v%s\n", ui.ColorRed, err, ui.ColorReset)
+	}
+
+	return nil
 }
 
 func (a *Agent) Close() {
