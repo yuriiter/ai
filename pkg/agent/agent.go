@@ -100,15 +100,25 @@ func (a *Agent) InitializeRAG(ctx context.Context) error {
 	cachePath := rag.GetDefaultCachePath(a.config.RagGlob)
 
 	if a.RagEngine.CacheExists(cachePath) {
-		fmt.Printf("%sFound embedding cache, loading...%s\n", ui.ColorBlue, ui.ColorReset)
-		if err := a.RagEngine.LoadEmbeddings(cachePath); err != nil {
-			fmt.Printf("%sCache load failed: %v, regenerating...%s\n", ui.ColorRed, err, ui.ColorReset)
+		fmt.Printf("%sFound embedding cache, validating...%s\n", ui.ColorBlue, ui.ColorReset)
+
+		valid, reason := a.RagEngine.ValidateCache(cachePath, a.config.RagGlob)
+
+		if valid {
+			fmt.Printf("%sCache is valid, loading...%s\n", ui.ColorGreen, ui.ColorReset)
+			if _, err := a.RagEngine.LoadEmbeddings(cachePath); err != nil {
+				fmt.Printf("%sCache load failed: %v, regenerating...%s\n", ui.ColorRed, err, ui.ColorReset)
+			} else {
+				return nil
+			}
 		} else {
-			return nil
+			fmt.Printf("%sCache is stale: %s%s\n", ui.ColorRed, reason, ui.ColorReset)
+			fmt.Printf("%sRegenerating embeddings...%s\n", ui.ColorBlue, ui.ColorReset)
 		}
+	} else {
+		fmt.Printf("%sNo cache found, generating embeddings...%s\n", ui.ColorBlue, ui.ColorReset)
 	}
 
-	fmt.Printf("%sNo cache found, generating embeddings...%s\n", ui.ColorBlue, ui.ColorReset)
 	if err := a.RagEngine.IngestGlob(ctx, a.config.RagGlob); err != nil {
 		return err
 	}

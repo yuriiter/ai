@@ -3,7 +3,9 @@ package rag
 import (
 	"archive/zip"
 	"context"
+	"crypto/sha256"
 	"encoding/gob"
+	"encoding/hex"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -14,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ledongthuc/pdf"
 	"github.com/nlpodyssey/cybertron/pkg/models/bert"
@@ -69,7 +72,7 @@ func NewLocalEmbedder() (*LocalEmbedder, error) {
 
 	model, err := tasks.Load[textencoding.Interface](&tasks.Config{
 		ModelsDir: filepath.Join(os.Getenv("HOME"), ".cybertron"),
-		ModelName: "sentence-transformers/paraphrase-MiniLM-L3-v2",
+		ModelName: "sentence-transformers/all-MiniLM-L6-v2",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to load local model: %w", err)
@@ -138,12 +141,21 @@ type Chunk struct {
 	Vector   []float32
 }
 
+type FileMetadata struct {
+	Path    string
+	ModTime time.Time
+	Size    int64
+}
+
 type EmbeddingCache struct {
-	Chunks      []Chunk
-	GlobPattern string
-	Provider    string
-	Model       string
-	Version     int
+	Chunks       []Chunk
+	GlobPattern  string
+	Provider     string
+	Model        string
+	Version      int
+	CreatedAt    time.Time
+	FileMetadata []FileMetadata
+	ContentHash  string
 }
 
 type Engine struct {
@@ -171,13 +183,115 @@ func New(client *openai.Client, configProvider string, configModel string) (*Eng
 	}, nil
 }
 
+func calculateContentHash(files []string) (string, error) {
+	hasher := sha256.New()
+
+	sortedFiles := make([]string, len(files))
+	copy(sortedFiles, files)
+	sort.Strings(sortedFiles)
+
+	for _, file := range sortedFiles {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return "", err
+		}
+		hasher.Write([]byte(file))
+		hasher.Write(data)
+	}
+
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func getFileMetadata(files []string) ([]FileMetadata, error) {
+	var metadata []FileMetadata
+
+	for _, file := range files {
+		info, err := os.Stat(file)
+		if err != nil {
+			return nil, err
+		}
+
+		metadata = append(metadata, FileMetadata{
+			Path:    file,
+			ModTime: info.ModTime(),
+			Size:    info.Size(),
+		})
+	}
+
+	return metadata, nil
+}
+
+func (e *Engine) ValidateCache(cachePath string, globPattern string) (bool, string) {
+	file, err := os.Open(cachePath)
+	if err != nil {
+		return false, "cache file not found"
+	}
+	defer file.Close()
+
+	var cache EmbeddingCache
+	decoder := gob.NewDecoder(file)
+	if err := decoder.Decode(&cache); err != nil {
+		return false, "failed to decode cache"
+	}
+
+	if cache.GlobPattern != globPattern {
+		return false, fmt.Sprintf("pattern mismatch: cached='%s' vs current='%s'", cache.GlobPattern, globPattern)
+	}
+
+	currentFiles := findFiles(globPattern)
+	if len(currentFiles) == 0 {
+		return false, "no files found matching pattern"
+	}
+
+	if len(currentFiles) != len(cache.FileMetadata) {
+		return false, fmt.Sprintf("file count changed: cached=%d vs current=%d", len(cache.FileMetadata), len(currentFiles))
+	}
+
+	currentMetadata, err := getFileMetadata(currentFiles)
+	if err != nil {
+		return false, "failed to read current file metadata"
+	}
+
+	cachedMap := make(map[string]FileMetadata)
+	for _, m := range cache.FileMetadata {
+		cachedMap[m.Path] = m
+	}
+
+	for _, current := range currentMetadata {
+		cached, exists := cachedMap[current.Path]
+		if !exists {
+			return false, fmt.Sprintf("new file detected: %s", current.Path)
+		}
+
+		if !current.ModTime.Equal(cached.ModTime) || current.Size != cached.Size {
+			return false, fmt.Sprintf("file changed: %s (time or size mismatch)", current.Path)
+		}
+	}
+
+	return true, ""
+}
+
 func (e *Engine) SaveEmbeddings(filepath string, globPattern string, provider string, model string) error {
+	files := findFiles(globPattern)
+	metadata, err := getFileMetadata(files)
+	if err != nil {
+		return fmt.Errorf("failed to get file metadata: %w", err)
+	}
+
+	contentHash, err := calculateContentHash(files)
+	if err != nil {
+		return fmt.Errorf("failed to calculate content hash: %w", err)
+	}
+
 	cache := EmbeddingCache{
-		Chunks:      e.Chunks,
-		GlobPattern: globPattern,
-		Provider:    provider,
-		Model:       model,
-		Version:     1,
+		Chunks:       e.Chunks,
+		GlobPattern:  globPattern,
+		Provider:     provider,
+		Model:        model,
+		Version:      1,
+		CreatedAt:    time.Now(),
+		FileMetadata: metadata,
+		ContentHash:  contentHash,
 	}
 
 	file, err := os.Create(filepath)
@@ -191,29 +305,32 @@ func (e *Engine) SaveEmbeddings(filepath string, globPattern string, provider st
 		return fmt.Errorf("failed to encode cache: %w", err)
 	}
 
-	fmt.Printf("%sEmbeddings saved to %s (%d chunks)%s\n", ui.ColorGreen, filepath, len(e.Chunks), ui.ColorReset)
+	fmt.Printf("%sEmbeddings saved to %s (%d chunks, %d files)%s\n",
+		ui.ColorGreen, filepath, len(e.Chunks), len(files), ui.ColorReset)
 	return nil
 }
 
-func (e *Engine) LoadEmbeddings(filepath string) error {
+func (e *Engine) LoadEmbeddings(filepath string) (*EmbeddingCache, error) {
 	file, err := os.Open(filepath)
 	if err != nil {
-		return fmt.Errorf("failed to open cache file: %w", err)
+		return nil, fmt.Errorf("failed to open cache file: %w", err)
 	}
 	defer file.Close()
 
 	var cache EmbeddingCache
 	decoder := gob.NewDecoder(file)
 	if err := decoder.Decode(&cache); err != nil {
-		return fmt.Errorf("failed to decode cache: %w", err)
+		return nil, fmt.Errorf("failed to decode cache: %w", err)
 	}
 
 	e.Chunks = cache.Chunks
-	fmt.Printf("%sLoaded %d cached embeddings from %s%s\n", ui.ColorGreen, len(e.Chunks), filepath, ui.ColorReset)
-	fmt.Printf("%s  Pattern: %s | Provider: %s | Model: %s%s\n",
-		ui.ColorBlue, cache.GlobPattern, cache.Provider, cache.Model, ui.ColorReset)
+	fmt.Printf("%sLoaded %d cached embeddings from %s%s\n",
+		ui.ColorGreen, len(e.Chunks), filepath, ui.ColorReset)
+	fmt.Printf("%s  Pattern: %s | Provider: %s | Model: %s | Created: %s%s\n",
+		ui.ColorBlue, cache.GlobPattern, cache.Provider, cache.Model,
+		cache.CreatedAt.Format("2006-01-02 15:04"), ui.ColorReset)
 
-	return nil
+	return &cache, nil
 }
 
 func (e *Engine) CacheExists(filepath string) bool {
