@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/yuriiter/ai/pkg/config"
+	"github.com/yuriiter/ai/pkg/rag"
 	"github.com/yuriiter/ai/pkg/tools"
 	"github.com/yuriiter/ai/pkg/ui"
 	"strings"
@@ -17,6 +18,7 @@ type Agent struct {
 	config      config.Config
 	history     []openai.ChatCompletionMessage
 	Registry    *tools.Registry
+	RagEngine   *rag.Engine
 	agenticMode bool
 }
 
@@ -26,6 +28,7 @@ func New(cfg config.Config, agenticMode bool, mcpServers []string) (*Agent, erro
 		clientConfig.BaseURL = cfg.BaseURL
 	}
 
+	client := openai.NewClientWithConfig(clientConfig)
 	reg := tools.NewRegistry()
 
 	if agenticMode {
@@ -56,23 +59,27 @@ func New(cfg config.Config, agenticMode bool, mcpServers []string) (*Agent, erro
 				"IMPORTANT GUIDELINES FOR TOOL USE:\n" +
 				"1. Use tools only when needed. For general conversation or greetings, do not use tools.\n" +
 				"2. FORMATTING IS CRITICAL: When calling a tool, use ONLY the tool name (e.g., 'get_weather').\n" +
-				"   NEVER append JSON arguments to the tool name. (e.g., DO NOT write 'get_weather{\"city\": \"London\"}').\n" +
+				"   NEVER append JSON arguments to the tool name.\n" +
 				"   Put all arguments inside the JSON arguments object.\n" +
-				"3. Do not guess argument values. If a tool requires a specific ID, path, or parameter you do not have:\n" +
-				"   a. Check if another tool can provide this information.\n" +
-				"   b. If not, ask the user for clarification.\n" +
+				"3. Do not guess argument values.\n" +
 				"4. Always provide all required parameters defined in the tool schema."
 		} else {
 			sysPrompt = "You are a helpful assistant."
 		}
 	}
 
+	ragEngine, err := rag.New(client, cfg.EmbeddingProvider, cfg.EmbeddingModel)
+	if err != nil {
+		return nil, fmt.Errorf("failed to init RAG engine: %w", err)
+	}
+
 	agent := &Agent{
-		client:      openai.NewClientWithConfig(clientConfig),
+		client:      client,
 		config:      cfg,
 		history:     make([]openai.ChatCompletionMessage, 0),
 		Registry:    reg,
 		agenticMode: agenticMode,
+		RagEngine:   ragEngine,
 	}
 
 	if sysPrompt != "" {
@@ -83,6 +90,13 @@ func New(cfg config.Config, agenticMode bool, mcpServers []string) (*Agent, erro
 	}
 
 	return agent, nil
+}
+
+func (a *Agent) InitializeRAG(ctx context.Context) error {
+	if a.config.RagGlob == "" {
+		return nil
+	}
+	return a.RagEngine.IngestGlob(ctx, a.config.RagGlob)
 }
 
 func (a *Agent) Close() {
@@ -108,6 +122,35 @@ func (a *Agent) pruneHistory() {
 	a.history = newHistory
 }
 
+func (a *Agent) generateSearchKeywords(ctx context.Context, userQuery string) string {
+	fmt.Printf("%sGenerating search keywords...%s ", ui.ColorBlue, ui.ColorReset)
+
+	req := openai.ChatCompletionRequest{
+		Model: a.config.Model,
+		Messages: []openai.ChatCompletionMessage{
+			{
+				Role:    openai.ChatMessageRoleSystem,
+				Content: "You are a search assistant. Convert the user's question into specific search keywords to search the vector database in details. Output ONLY the space-separated keywords, do your best in search assistance, output most relevant keywords and pretty many of them. No explanation.",
+			},
+			{
+				Role:    openai.ChatMessageRoleUser,
+				Content: userQuery,
+			},
+		},
+		Temperature: 0.1,
+	}
+
+	resp, err := a.client.CreateChatCompletion(ctx, req)
+	if err != nil || len(resp.Choices) == 0 {
+		fmt.Println("(failed, using original query)")
+		return userQuery
+	}
+
+	keywords := strings.TrimSpace(resp.Choices[0].Message.Content)
+	fmt.Printf("[%s]\n", keywords)
+	return keywords
+}
+
 func (a *Agent) RunTurn(ctx context.Context, prompt string, streaming bool) error {
 	historyStartLen := len(a.history)
 
@@ -119,9 +162,29 @@ func (a *Agent) RunTurn(ctx context.Context, prompt string, streaming bool) erro
 
 	a.pruneHistory()
 
+	finalPrompt := prompt
+
+	if a.config.RagGlob != "" && len(a.RagEngine.Chunks) > 0 {
+		searchQuery := a.generateSearchKeywords(ctx, prompt)
+
+		results, err := a.RagEngine.Search(ctx, searchQuery, 3)
+		if err != nil {
+			fmt.Printf("%sRAG Search Error: %v%s\n", ui.ColorRed, err, ui.ColorReset)
+		} else if len(results) > 0 {
+			var contextBuilder strings.Builder
+			contextBuilder.WriteString("Use the following context to answer the user's question:\n\n")
+			for _, r := range results {
+				contextBuilder.WriteString(fmt.Sprintf("--- Source: %s ---\n%s\n\n", r.Filename, r.Text))
+			}
+			contextBuilder.WriteString("User Question: " + prompt)
+			finalPrompt = contextBuilder.String()
+			fmt.Printf("%sFound %d relevant context chunks.%s\n", ui.ColorGreen, len(results), ui.ColorReset)
+		}
+	}
+
 	a.history = append(a.history, openai.ChatCompletionMessage{
 		Role:    openai.ChatMessageRoleUser,
-		Content: prompt,
+		Content: finalPrompt,
 	})
 
 	maxSteps := a.config.MaxSteps
@@ -147,6 +210,10 @@ func (a *Agent) RunTurn(ctx context.Context, prompt string, streaming bool) erro
 		resp, err := a.client.CreateChatCompletion(ctx, req)
 		if err != nil {
 			return fmt.Errorf("api error: %w", err)
+		}
+
+		if len(resp.Choices) == 0 {
+			return fmt.Errorf("api returned empty response (no choices)")
 		}
 
 		msg := resp.Choices[0].Message

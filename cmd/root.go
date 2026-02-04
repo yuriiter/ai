@@ -20,22 +20,32 @@ var (
 	memoryFlag      bool
 	stepsFlag       int
 	temperatureFlag float32
+	localEmbFlag    bool
 	mcpFlags        []string
+	ragFlag         string
 )
 
 var rootCmd = &cobra.Command{
 	Use:   "ai [prompt...]",
-	Short: "A CLI AI Agent with optional MCP support",
+	Short: "A CLI AI Agent with optional MCP and RAG support",
 	Run: func(cmd *cobra.Command, args []string) {
 		cfg := config.Load()
-		if cfg.ApiKey == "" {
-			fmt.Fprintf(os.Stderr, "%sError: AI_API_KEY not set.%s\n", ui.ColorRed, ui.ColorReset)
-			os.Exit(1)
+
+		if cfg.ApiKey == "" && !localEmbFlag {
+			if !strings.Contains(cfg.BaseURL, "localhost") {
+				fmt.Fprintf(os.Stderr, "%sError: AI_API_KEY not set.%s\n", ui.ColorRed, ui.ColorReset)
+				os.Exit(1)
+			}
 		}
 
 		cfg.MaxSteps = stepsFlag
 		cfg.RetainHistory = memoryFlag
 		cfg.Temperature = temperatureFlag
+		cfg.RagGlob = ragFlag
+
+		if localEmbFlag {
+			cfg.EmbeddingProvider = "local"
+		}
 
 		aiAgent, err := agent.New(cfg, agentFlag, mcpFlags)
 		if err != nil {
@@ -45,6 +55,13 @@ var rootCmd = &cobra.Command{
 		defer aiAgent.Close()
 
 		ctx := context.Background()
+
+		if ragFlag != "" {
+			if err := aiAgent.InitializeRAG(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "%sRAG Initialization Error: %v%s\n", ui.ColorRed, err, ui.ColorReset)
+				os.Exit(1)
+			}
+		}
 
 		if interactiveFlag {
 			startInteractive(ctx, aiAgent)
@@ -94,7 +111,9 @@ func Execute() {
 	rootCmd.Flags().BoolVarP(&memoryFlag, "memory", "m", false, "Retain conversation history between turns")
 	rootCmd.Flags().IntVar(&stepsFlag, "steps", 10, "Maximum number of agentic steps allowed")
 	rootCmd.Flags().Float32VarP(&temperatureFlag, "temperature", "t", 1.0, "Set model temperature (0.0 - 2.0)")
-	rootCmd.Flags().StringArrayVar(&mcpFlags, "mcp", []string{}, "Command to start an MCP server (can be used multiple times)")
+	rootCmd.Flags().StringArrayVar(&mcpFlags, "mcp", []string{}, "Command to start an MCP server")
+	rootCmd.Flags().StringVar(&ragFlag, "rag", "", "Glob pattern for RAG documents")
+	rootCmd.Flags().BoolVar(&localEmbFlag, "local-rag", false, "Use local in-memory embedding model (downloads on first run)")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
