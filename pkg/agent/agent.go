@@ -130,7 +130,7 @@ func (a *Agent) generateSearchKeywords(ctx context.Context, userQuery string) st
 		Messages: []openai.ChatCompletionMessage{
 			{
 				Role:    openai.ChatMessageRoleSystem,
-				Content: "You are a search assistant. Convert the user's question into specific search keywords to search the vector database in details. Output ONLY the space-separated keywords, do your best in search assistance, output most relevant keywords and pretty many of them. No explanation.",
+				Content: "You are a search assistant. Convert the user's question into a list of specific search keywords to search the vector database in details. Output ONLY the space-separated keywords, do your best in search assistance, output most relevant keywords and pretty many of them. No explanation.",
 			},
 			{
 				Role:    openai.ChatMessageRoleUser,
