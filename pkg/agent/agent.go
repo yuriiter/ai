@@ -8,6 +8,8 @@ import (
 	"github.com/yuriiter/ai/pkg/rag"
 	"github.com/yuriiter/ai/pkg/tools"
 	"github.com/yuriiter/ai/pkg/ui"
+	"os"
+	"regexp"
 	"strings"
 
 	openai "github.com/sashabaranov/go-openai"
@@ -90,6 +92,87 @@ func New(cfg config.Config, agenticMode bool, mcpServers []string) (*Agent, erro
 	}
 
 	return agent, nil
+}
+
+func (a *Agent) SaveSession(filename string) error {
+	f, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	fmt.Fprintf(f, "# Chat Session\n\n")
+
+	for _, msg := range a.history {
+		role := msg.Role
+		content := msg.Content
+
+		if len(msg.ToolCalls) > 0 {
+			var calls []string
+			for _, tc := range msg.ToolCalls {
+				calls = append(calls, fmt.Sprintf("Tool Call: %s(%s)", tc.Function.Name, tc.Function.Arguments))
+			}
+			if content != "" {
+				content += "\n\n"
+			}
+			content += fmt.Sprintf("`%s`", strings.Join(calls, ", "))
+		}
+
+		fmt.Fprintf(f, "## role: %s\n%s\n\n", role, content)
+	}
+	return nil
+}
+
+func (a *Agent) LoadSession(filename string) error {
+	contentBytes, err := os.ReadFile(filename)
+	if err != nil {
+		return err
+	}
+	content := string(contentBytes)
+
+	var newHistory []openai.ChatCompletionMessage
+	lines := strings.Split(content, "\n")
+
+	roleRegex := regexp.MustCompile(`^## role:\s*(\w+)`)
+
+	var currentRole string
+	var currentContentBuilder strings.Builder
+
+	flush := func() {
+		if currentRole != "" {
+			text := strings.TrimSpace(currentContentBuilder.String())
+			if text != "" || currentRole == openai.ChatMessageRoleAssistant {
+				newHistory = append(newHistory, openai.ChatCompletionMessage{
+					Role:    currentRole,
+					Content: text,
+				})
+			}
+		}
+	}
+
+	for _, line := range lines {
+		if match := roleRegex.FindStringSubmatch(line); len(match) > 1 {
+			flush()
+			currentRole = match[1]
+			currentContentBuilder.Reset()
+			continue
+		}
+
+		if strings.HasPrefix(line, "# ") && !strings.HasPrefix(line, "## role:") {
+			continue
+		}
+
+		if currentRole != "" {
+			currentContentBuilder.WriteString(line + "\n")
+		}
+	}
+	flush()
+
+	if len(newHistory) > 0 {
+		a.history = newHistory
+	}
+
+	return nil
 }
 
 func (a *Agent) InitializeRAG(ctx context.Context) error {
@@ -182,7 +265,27 @@ func (a *Agent) generateSearchKeywords(ctx context.Context, userQuery string) st
 	return keywords
 }
 
+func (a *Agent) RunTurnCapture(ctx context.Context, prompt string) (string, error) {
+	var capturedOutput strings.Builder
+
+	err := a.runTurnInternal(ctx, prompt, func(s string) {
+		capturedOutput.WriteString(s)
+		fmt.Print(s)
+	})
+
+	if err != nil {
+		return "", err
+	}
+	return capturedOutput.String(), nil
+}
+
 func (a *Agent) RunTurn(ctx context.Context, prompt string, streaming bool) error {
+	return a.runTurnInternal(ctx, prompt, func(s string) {
+		ui.PrintAgentMessage(s)
+	})
+}
+
+func (a *Agent) runTurnInternal(ctx context.Context, prompt string, printFn func(string)) error {
 	historyStartLen := len(a.history)
 
 	defer func() {
@@ -277,7 +380,7 @@ func (a *Agent) RunTurn(ctx context.Context, prompt string, streaming bool) erro
 			continue
 		}
 
-		ui.PrintAgentMessage(msg.Content + "\n")
+		printFn(msg.Content + "\n")
 		return nil
 	}
 

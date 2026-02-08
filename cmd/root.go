@@ -7,6 +7,8 @@ import (
 	"github.com/yuriiter/ai/pkg/agent"
 	"github.com/yuriiter/ai/pkg/config"
 	"github.com/yuriiter/ai/pkg/ui"
+	"github.com/yuriiter/ai/pkg/voice"
+	"golang.org/x/term"
 	"os"
 	"strings"
 
@@ -23,6 +25,9 @@ var (
 	localEmbFlag    bool
 	mcpFlags        []string
 	ragFlag         string
+	saveSessionFlag string
+	loadSessionFlag string
+	voiceFlag       bool
 )
 
 var rootCmd = &cobra.Command{
@@ -54,6 +59,24 @@ var rootCmd = &cobra.Command{
 		}
 		defer aiAgent.Close()
 
+		if loadSessionFlag != "" {
+			if err := aiAgent.LoadSession(loadSessionFlag); err != nil {
+				fmt.Fprintf(os.Stderr, "%sError loading session: %v%s\n", ui.ColorRed, err, ui.ColorReset)
+				os.Exit(1)
+			}
+			fmt.Printf("%sSession loaded from %s%s\n", ui.ColorGreen, loadSessionFlag, ui.ColorReset)
+		}
+
+		if saveSessionFlag != "" {
+			defer func() {
+				if err := aiAgent.SaveSession(saveSessionFlag); err != nil {
+					fmt.Fprintf(os.Stderr, "%sError saving session: %v%s\n", ui.ColorRed, err, ui.ColorReset)
+				} else {
+					fmt.Printf("%sSession saved to %s%s\n", ui.ColorGreen, saveSessionFlag, ui.ColorReset)
+				}
+			}()
+		}
+
 		ctx := context.Background()
 
 		if ragFlag != "" {
@@ -64,7 +87,11 @@ var rootCmd = &cobra.Command{
 		}
 
 		if interactiveFlag {
-			startInteractive(ctx, aiAgent)
+			if voiceFlag {
+				startVoiceInteractive(ctx, aiAgent)
+			} else {
+				startInteractive(ctx, aiAgent)
+			}
 			return
 		}
 
@@ -104,6 +131,81 @@ func startInteractive(ctx context.Context, ai *agent.Agent) {
 	}
 }
 
+func startVoiceInteractive(ctx context.Context, ai *agent.Agent) {
+	fmt.Println("Voice Mode Enabled.")
+	fmt.Println("Press SPACE to start recording. Press SPACE again to stop and send.")
+	fmt.Println("Press Ctrl+C to quit.")
+
+	vm, err := voice.NewManager(config.Load().ApiKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to init voice manager: %v\n", err)
+		os.Exit(1)
+	}
+	defer vm.Close()
+
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to set raw terminal: %v\n", err)
+		os.Exit(1)
+	}
+	defer term.Restore(int(os.Stdin.Fd()), oldState)
+
+	screenReader := bufio.NewReader(os.Stdin)
+
+	for {
+		fmt.Printf("\r\033[K[WAITING] Press SPACE to speak...")
+
+		for {
+			r, _, err := screenReader.ReadRune()
+			if err != nil {
+				return
+			}
+			if r == ' ' {
+				break
+			}
+			if r == 3 {
+				return
+			}
+		}
+
+		fmt.Printf("\r\033[K[RECORDING] Speak now (Press SPACE to stop)...")
+
+		audioData, err := vm.RecordUntilSpace(screenReader)
+		if err != nil {
+			fmt.Printf("\r\033[KError recording: %v\n", err)
+			continue
+		}
+
+		fmt.Printf("\r\033[K[PROCESSING] Transcribing...")
+		text, err := vm.Transcribe(ctx, audioData)
+		if err != nil {
+			fmt.Printf("\r\033[KTranscription error: %v\n", err)
+			continue
+		}
+
+		if strings.TrimSpace(text) == "" {
+			fmt.Printf("\r\033[KNo speech detected.\n")
+			continue
+		}
+
+		term.Restore(int(os.Stdin.Fd()), oldState)
+		fmt.Printf("\r\033[K\n%sYou (Voice): %s%s\n", ui.ColorBlue, text, ui.ColorReset)
+
+		response, err := ai.RunTurnCapture(ctx, text)
+		term.MakeRaw(int(os.Stdin.Fd()))
+
+		if err != nil {
+			fmt.Printf("Agent Error: %v\n", err)
+			continue
+		}
+
+		fmt.Printf("\r\033[K[SPEAKING] Generating audio...")
+		if err := vm.Speak(ctx, response); err != nil {
+			fmt.Printf("\r\033[KError speaking: %v\n", err)
+		}
+	}
+}
+
 func Execute() {
 	rootCmd.Flags().BoolVarP(&editorFlag, "editor", "e", false, "Open editor to compose prompt")
 	rootCmd.Flags().BoolVarP(&interactiveFlag, "interactive", "i", false, "Start interactive chat")
@@ -114,6 +216,9 @@ func Execute() {
 	rootCmd.Flags().StringArrayVar(&mcpFlags, "mcp", []string{}, "Command to start an MCP server")
 	rootCmd.Flags().StringVar(&ragFlag, "rag", "", "Glob pattern for RAG documents")
 	rootCmd.Flags().BoolVar(&localEmbFlag, "local-rag", false, "Use local in-memory embedding model (downloads on first run)")
+	rootCmd.Flags().StringVar(&saveSessionFlag, "save-session", "", "Save chat history to a Markdown file")
+	rootCmd.Flags().StringVar(&loadSessionFlag, "session", "", "Load chat history from a Markdown file")
+	rootCmd.Flags().BoolVar(&voiceFlag, "voice", false, "Enable voice interaction (requires --interactive)")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)

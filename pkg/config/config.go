@@ -37,7 +37,6 @@ func Load() Config {
 		c.EmbeddingProvider = "openai"
 	}
 
-	// Default model for OpenAI
 	if c.EmbeddingModel == "" {
 		c.EmbeddingModel = "text-embedding-3-small"
 	}

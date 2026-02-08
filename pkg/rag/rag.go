@@ -22,6 +22,7 @@ import (
 	"github.com/nlpodyssey/cybertron/pkg/models/bert"
 	"github.com/nlpodyssey/cybertron/pkg/tasks"
 	"github.com/nlpodyssey/cybertron/pkg/tasks/textencoding"
+	"github.com/rs/zerolog"
 	openai "github.com/sashabaranov/go-openai"
 	"github.com/taylorskalyo/goreader/epub"
 	"github.com/yuriiter/ai/pkg/ui"
@@ -69,6 +70,8 @@ type LocalEmbedder struct {
 
 func NewLocalEmbedder() (*LocalEmbedder, error) {
 	fmt.Printf("%sInitializing local embedding model (downloading if needed)...%s\n", ui.ColorBlue, ui.ColorReset)
+
+	zerolog.SetGlobalLevel(zerolog.WarnLevel)
 
 	model, err := tasks.Load[textencoding.Interface](&tasks.Config{
 		ModelsDir: filepath.Join(os.Getenv("HOME"), ".cybertron"),
@@ -523,7 +526,13 @@ func chunkText(text string, chunkSize, overlap int) []string {
 	return chunks
 }
 
-func extractText(path string) (string, error) {
+func extractText(path string) (text string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic recovering file %s: %v", path, r)
+		}
+	}()
+
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
 	case ".txt", ".md", ".go", ".js", ".json", ".py", ".html", ".css", ".java", ".c", ".h", ".cpp":
@@ -536,11 +545,16 @@ func extractText(path string) (string, error) {
 		}
 		defer f.Close()
 		var sb strings.Builder
-		for i := 1; i <= r.NumPage(); i++ {
+		total := r.NumPage()
+		for i := 1; i <= total; i++ {
 			p := r.Page(i)
 			if !p.V.IsNull() {
-				t, _ := p.GetPlainText(nil)
-				sb.WriteString(t + "\n")
+				t, err := p.GetPlainText(nil)
+				if err != nil {
+					continue
+				}
+				sb.WriteString(t)
+				sb.WriteString("\n")
 			}
 		}
 		return sb.String(), nil
@@ -553,17 +567,22 @@ func extractText(path string) (string, error) {
 		}
 		defer rc.Close()
 		var sb strings.Builder
-		for _, item := range rc.Rootfiles[0].Manifest.Items {
-			if strings.Contains(item.MediaType, "html") {
-				f, _ := item.Open()
-				b, _ := io.ReadAll(f)
-				f.Close()
-				sb.WriteString(stripTags(string(b)) + "\n")
+		if len(rc.Rootfiles) > 0 {
+			for _, item := range rc.Rootfiles[0].Manifest.Items {
+				if strings.Contains(item.MediaType, "html") {
+					f, err := item.Open()
+					if err != nil {
+						continue
+					}
+					b, _ := io.ReadAll(f)
+					f.Close()
+					sb.WriteString(stripTags(string(b)) + "\n")
+				}
 			}
 		}
 		return sb.String(), nil
 	}
-	return "", fmt.Errorf("unsupported type")
+	return "", fmt.Errorf("unsupported type: %s", ext)
 }
 
 func parseDocx(path string) (string, error) {
@@ -575,7 +594,10 @@ func parseDocx(path string) (string, error) {
 	var sb strings.Builder
 	for _, f := range r.File {
 		if f.Name == "word/document.xml" {
-			rc, _ := f.Open()
+			rc, err := f.Open()
+			if err != nil {
+				return "", err
+			}
 			defer rc.Close()
 			dec := xml.NewDecoder(rc)
 			for {
@@ -583,12 +605,13 @@ func parseDocx(path string) (string, error) {
 				if t == nil {
 					break
 				}
-				if se, ok := t.(xml.StartElement); ok && se.Name.Local == "t" {
+				if se, ok := t.(xml.StartElement); ok && (se.Name.Local == "t") {
 					var s string
 					dec.DecodeElement(&s, &se)
 					sb.WriteString(s)
+					sb.WriteString(" ")
 				}
-				if se, ok := t.(xml.StartElement); ok && se.Name.Local == "p" {
+				if se, ok := t.(xml.StartElement); ok && (se.Name.Local == "p" || se.Name.Local == "br") {
 					sb.WriteString("\n")
 				}
 			}
