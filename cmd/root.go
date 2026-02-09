@@ -16,18 +16,19 @@ import (
 )
 
 var (
-	editorFlag      bool
-	interactiveFlag bool
-	agentFlag       bool
-	memoryFlag      bool
-	stepsFlag       int
-	temperatureFlag float32
-	localEmbFlag    bool
-	mcpFlags        []string
-	ragFlag         string
-	saveSessionFlag string
-	loadSessionFlag string
-	voiceFlag       bool
+	editorFlag       bool
+	interactiveFlag  bool
+	agentFlag        bool
+	memoryFlag       bool
+	stepsFlag        int
+	temperatureFlag  float32
+	localEmbFlag     bool
+	mcpFlags         []string
+	ragFlag          string
+	saveSessionFlag  string
+	loadSessionFlag  string
+	voiceFlag        bool
+	localVoiceHFFlag bool
 )
 
 var rootCmd = &cobra.Command{
@@ -36,17 +37,25 @@ var rootCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		cfg := config.Load()
 
-		if cfg.ApiKey == "" && !localEmbFlag {
-			if !strings.Contains(cfg.BaseURL, "localhost") {
-				fmt.Fprintf(os.Stderr, "%sError: AI_API_KEY not set.%s\n", ui.ColorRed, ui.ColorReset)
-				os.Exit(1)
-			}
+		if cfg.ApiKey == "" && !localEmbFlag && !strings.Contains(cfg.BaseURL, "localhost") {
+			fmt.Fprintf(os.Stderr, "%sError: AI_API_KEY not set.%s\n", ui.ColorRed, ui.ColorReset)
+			os.Exit(1)
+		}
+
+		if cfg.ApiKey != "" && !strings.HasPrefix(cfg.ApiKey, "sk-") && !localEmbFlag && strings.Contains(cfg.BaseURL, "openai.com") {
+			fmt.Fprintf(os.Stderr, "%sWarning: Your API key does not start with 'sk-'. Ensure you are using a valid OpenAI key, or set OPENAI_BASE_URL for other providers.%s\n", ui.ColorRed, ui.ColorReset)
 		}
 
 		cfg.MaxSteps = stepsFlag
 		cfg.RetainHistory = memoryFlag
 		cfg.Temperature = temperatureFlag
 		cfg.RagGlob = ragFlag
+
+		if localVoiceHFFlag {
+			cfg.VoiceProvider = "local-hf"
+		} else {
+			cfg.VoiceProvider = "openai"
+		}
 
 		if localEmbFlag {
 			cfg.EmbeddingProvider = "local"
@@ -87,8 +96,8 @@ var rootCmd = &cobra.Command{
 		}
 
 		if interactiveFlag {
-			if voiceFlag {
-				startVoiceInteractive(ctx, aiAgent)
+			if voiceFlag || localVoiceHFFlag {
+				startVoiceInteractive(ctx, aiAgent, cfg)
 			} else {
 				startInteractive(ctx, aiAgent)
 			}
@@ -131,12 +140,12 @@ func startInteractive(ctx context.Context, ai *agent.Agent) {
 	}
 }
 
-func startVoiceInteractive(ctx context.Context, ai *agent.Agent) {
-	fmt.Println("Voice Mode Enabled.")
+func startVoiceInteractive(ctx context.Context, ai *agent.Agent, cfg config.Config) {
+	fmt.Printf("Voice Mode Enabled [%s].\n", cfg.VoiceProvider)
 	fmt.Println("Press SPACE to start recording. Press SPACE again to stop and send.")
 	fmt.Println("Press Ctrl+C to quit.")
 
-	vm, err := voice.NewManager(config.Load().ApiKey)
+	vm, err := voice.NewManager(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to init voice manager: %v\n", err)
 		os.Exit(1)
@@ -218,7 +227,9 @@ func Execute() {
 	rootCmd.Flags().BoolVar(&localEmbFlag, "local-rag", false, "Use local in-memory embedding model (downloads on first run)")
 	rootCmd.Flags().StringVar(&saveSessionFlag, "save-session", "", "Save chat history to a Markdown file")
 	rootCmd.Flags().StringVar(&loadSessionFlag, "session", "", "Load chat history from a Markdown file")
-	rootCmd.Flags().BoolVar(&voiceFlag, "voice", false, "Enable voice interaction (requires --interactive)")
+
+	rootCmd.Flags().BoolVar(&voiceFlag, "voice", false, "Enable cloud voice interaction (OpenAI)")
+	rootCmd.Flags().BoolVar(&localVoiceHFFlag, "local-hf", false, "Enable local Hugging Face voice (Requires Python + Torch)")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)

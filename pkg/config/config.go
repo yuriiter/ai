@@ -18,6 +18,10 @@ type Config struct {
 	RetainHistory      bool
 	Temperature        float32
 	RagGlob            string
+
+	VoiceProvider string
+	HF_STT_Model  string
+	HF_TTS_Model  string
 }
 
 func Load() Config {
@@ -31,6 +35,9 @@ func Load() Config {
 		SystemInstructions: os.Getenv("OPENAI_SYSTEM_INSTRUCTIONS"),
 		MaxSteps:           10,
 		Temperature:        1.0,
+		VoiceProvider:      "openai",
+		HF_STT_Model:       "openai/whisper-base.en",
+		HF_TTS_Model:       "facebook/mms-tts-eng",
 	}
 
 	if c.EmbeddingProvider == "" {
