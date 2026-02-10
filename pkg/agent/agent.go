@@ -243,15 +243,17 @@ func (a *Agent) generateSearchKeywords(ctx context.Context, userQuery string) st
 		Model: a.config.Model,
 		Messages: []openai.ChatCompletionMessage{
 			{
-				Role:    openai.ChatMessageRoleSystem,
-				Content: "You are a search assistant. Convert the user's question into a list of specific search keywords to search the vector database in details. Output ONLY the space-separated keywords, do your best in search assistance, output most relevant keywords and pretty many of them. No explanation.",
-			},
+				Role: openai.ChatMessageRoleSystem,
+				Content: "You are a retrieval assistant. Your goal is to rewrite the user's input into a concise, information-dense search query for a vector database. " +
+					"Remove conversational filler. Keep all technical terms, names, and specific requirements. " +
+					"Output ONLY the distilled search text."},
 			{
 				Role:    openai.ChatMessageRoleUser,
 				Content: userQuery,
 			},
 		},
-		Temperature: 0.1,
+		Temperature: 0.2,
+		MaxTokens:   150,
 	}
 
 	resp, err := a.client.CreateChatCompletion(ctx, req)
