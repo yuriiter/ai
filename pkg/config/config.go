@@ -10,14 +10,13 @@ type Config struct {
 	ApiKey             string
 	BaseURL            string
 	Model              string
-	EmbeddingProvider  string
-	EmbeddingModel     string
 	Editor             string
 	SystemInstructions string
 	MaxSteps           int
 	RetainHistory      bool
 	Temperature        float32
-	RagGlob            string
+	RagGlobs           []string
+	RagTopK            int
 }
 
 func Load() Config {
@@ -25,20 +24,11 @@ func Load() Config {
 		ApiKey:             os.Getenv("OPENAI_API_KEY"),
 		BaseURL:            os.Getenv("OPENAI_BASE_URL"),
 		Model:              os.Getenv("OPENAI_MODEL"),
-		EmbeddingProvider:  os.Getenv("AI_EMBEDDING_PROVIDER"),
-		EmbeddingModel:     os.Getenv("OPENAI_EMBEDDING_MODEL"),
 		Editor:             os.Getenv("EDITOR"),
 		SystemInstructions: os.Getenv("OPENAI_SYSTEM_INSTRUCTIONS"),
 		MaxSteps:           10,
 		Temperature:        1.0,
-	}
-
-	if c.EmbeddingProvider == "" {
-		c.EmbeddingProvider = "openai"
-	}
-
-	if c.EmbeddingModel == "" {
-		c.EmbeddingModel = "text-embedding-3-small"
+		RagTopK:            3,
 	}
 
 	if c.Model == "" {

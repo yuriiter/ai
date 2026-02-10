@@ -13,6 +13,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -23,44 +25,12 @@ import (
 	"github.com/nlpodyssey/cybertron/pkg/tasks"
 	"github.com/nlpodyssey/cybertron/pkg/tasks/textencoding"
 	"github.com/rs/zerolog"
-	openai "github.com/sashabaranov/go-openai"
 	"github.com/taylorskalyo/goreader/epub"
 	"github.com/yuriiter/ai/pkg/ui"
 )
 
 type Embedder interface {
 	Embed(ctx context.Context, texts []string) ([][]float32, error)
-}
-
-type OpenAIEmbedder struct {
-	client *openai.Client
-	model  string
-}
-
-func (o *OpenAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
-	const maxBatchSize = 2048
-	var allResults [][]float32
-
-	for i := 0; i < len(texts); i += maxBatchSize {
-		end := i + maxBatchSize
-		if end > len(texts) {
-			end = len(texts)
-		}
-		batch := texts[i:end]
-
-		resp, err := o.client.CreateEmbeddings(ctx, openai.EmbeddingRequest{
-			Input: batch,
-			Model: openai.EmbeddingModel(o.model),
-		})
-		if err != nil {
-			return nil, err
-		}
-
-		for _, d := range resp.Data {
-			allResults = append(allResults, d.Embedding)
-		}
-	}
-	return allResults, nil
 }
 
 type LocalEmbedder struct {
@@ -86,7 +56,7 @@ func NewLocalEmbedder() (*LocalEmbedder, error) {
 func (l *LocalEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	results := make([][]float32, len(texts))
 
-	numWorkers := 4
+	numWorkers := runtime.NumCPU()
 	if len(texts) < numWorkers {
 		numWorkers = len(texts)
 	}
@@ -105,16 +75,11 @@ func (l *LocalEmbedder) Embed(ctx context.Context, texts []string) ([][]float32,
 		go func() {
 			defer wg.Done()
 			for j := range jobs {
-				output, err := l.interfaceModel.Encode(ctx, j.text, int(bert.MeanPooling))
+				vec, err := l.safeEncode(ctx, j.text)
 				if err != nil {
-					select {
-					case errors <- err:
-					default:
-					}
-					return
+					fmt.Printf("\nWarning: Skipping chunk %d due to encoding error: %v\n", j.index, err)
+					continue
 				}
-
-				vec := output.Vector.Data().F32()
 
 				l.mu.Lock()
 				results[j.index] = vec
@@ -131,11 +96,32 @@ func (l *LocalEmbedder) Embed(ctx context.Context, texts []string) ([][]float32,
 	wg.Wait()
 	close(errors)
 
-	if err := <-errors; err != nil {
-		return nil, err
+	return results, nil
+}
+
+func (l *LocalEmbedder) safeEncode(ctx context.Context, text string) ([]float32, error) {
+	output, err := l.interfaceModel.Encode(ctx, text, int(bert.MeanPooling))
+	if err == nil {
+		return output.Vector.Data().F32(), nil
 	}
 
-	return results, nil
+	if len(text) > 1024 {
+		safeText := text[:1024]
+		output, err = l.interfaceModel.Encode(ctx, safeText, int(bert.MeanPooling))
+		if err == nil {
+			return output.Vector.Data().F32(), nil
+		}
+	}
+
+	if len(text) > 512 {
+		safeText := text[:512]
+		output, err = l.interfaceModel.Encode(ctx, safeText, int(bert.MeanPooling))
+		if err == nil {
+			return output.Vector.Data().F32(), nil
+		}
+	}
+
+	return nil, err
 }
 
 type Chunk struct {
@@ -152,7 +138,7 @@ type FileMetadata struct {
 
 type EmbeddingCache struct {
 	Chunks       []Chunk
-	GlobPattern  string
+	GlobPatterns []string
 	Provider     string
 	Model        string
 	Version      int
@@ -166,16 +152,8 @@ type Engine struct {
 	Chunks   []Chunk
 }
 
-func New(client *openai.Client, configProvider string, configModel string) (*Engine, error) {
-	var emb Embedder
-	var err error
-
-	if configProvider == "local" {
-		emb, err = NewLocalEmbedder()
-	} else {
-		emb = &OpenAIEmbedder{client: client, model: configModel}
-	}
-
+func New() (*Engine, error) {
+	emb, err := NewLocalEmbedder()
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +202,7 @@ func getFileMetadata(files []string) ([]FileMetadata, error) {
 	return metadata, nil
 }
 
-func (e *Engine) ValidateCache(cachePath string, globPattern string) (bool, string) {
+func (e *Engine) ValidateCache(cachePath string, globPatterns []string) (bool, string) {
 	file, err := os.Open(cachePath)
 	if err != nil {
 		return false, "cache file not found"
@@ -237,13 +215,24 @@ func (e *Engine) ValidateCache(cachePath string, globPattern string) (bool, stri
 		return false, "failed to decode cache"
 	}
 
-	if cache.GlobPattern != globPattern {
-		return false, fmt.Sprintf("pattern mismatch: cached='%s' vs current='%s'", cache.GlobPattern, globPattern)
+	if len(cache.GlobPatterns) != len(globPatterns) {
+		return false, "pattern count mismatch"
 	}
 
-	currentFiles := findFiles(globPattern)
+	sort.Strings(cache.GlobPatterns)
+	currentPatterns := make([]string, len(globPatterns))
+	copy(currentPatterns, globPatterns)
+	sort.Strings(currentPatterns)
+
+	for i := range cache.GlobPatterns {
+		if cache.GlobPatterns[i] != currentPatterns[i] {
+			return false, "pattern mismatch"
+		}
+	}
+
+	currentFiles := findFiles(globPatterns)
 	if len(currentFiles) == 0 {
-		return false, "no files found matching pattern"
+		return false, "no files found matching patterns"
 	}
 
 	if len(currentFiles) != len(cache.FileMetadata) {
@@ -267,15 +256,15 @@ func (e *Engine) ValidateCache(cachePath string, globPattern string) (bool, stri
 		}
 
 		if !current.ModTime.Equal(cached.ModTime) || current.Size != cached.Size {
-			return false, fmt.Sprintf("file changed: %s (time or size mismatch)", current.Path)
+			return false, fmt.Sprintf("file changed: %s", current.Path)
 		}
 	}
 
 	return true, ""
 }
 
-func (e *Engine) SaveEmbeddings(filepath string, globPattern string, provider string, model string) error {
-	files := findFiles(globPattern)
+func (e *Engine) SaveEmbeddings(filepath string, globPatterns []string) error {
+	files := findFiles(globPatterns)
 	metadata, err := getFileMetadata(files)
 	if err != nil {
 		return fmt.Errorf("failed to get file metadata: %w", err)
@@ -288,9 +277,9 @@ func (e *Engine) SaveEmbeddings(filepath string, globPattern string, provider st
 
 	cache := EmbeddingCache{
 		Chunks:       e.Chunks,
-		GlobPattern:  globPattern,
-		Provider:     provider,
-		Model:        model,
+		GlobPatterns: globPatterns,
+		Provider:     "local",
+		Model:        "sentence-transformers/all-MiniLM-L6-v2",
 		Version:      1,
 		CreatedAt:    time.Now(),
 		FileMetadata: metadata,
@@ -329,8 +318,8 @@ func (e *Engine) LoadEmbeddings(filepath string) (*EmbeddingCache, error) {
 	e.Chunks = cache.Chunks
 	fmt.Printf("%sLoaded %d cached embeddings from %s%s\n",
 		ui.ColorGreen, len(e.Chunks), filepath, ui.ColorReset)
-	fmt.Printf("%s  Pattern: %s | Provider: %s | Model: %s | Created: %s%s\n",
-		ui.ColorBlue, cache.GlobPattern, cache.Provider, cache.Model,
+	fmt.Printf("%s  Patterns: %s | Provider: %s | Model: %s | Created: %s%s\n",
+		ui.ColorBlue, strings.Join(cache.GlobPatterns, ", "), cache.Provider, cache.Model,
 		cache.CreatedAt.Format("2006-01-02 15:04"), ui.ColorReset)
 
 	return &cache, nil
@@ -341,21 +330,30 @@ func (e *Engine) CacheExists(filepath string) bool {
 	return err == nil
 }
 
-func GetDefaultCachePath(globPattern string) string {
-	safe := strings.ReplaceAll(globPattern, "/", "_")
-	safe = strings.ReplaceAll(safe, "*", "all")
-	safe = strings.ReplaceAll(safe, ".", "_")
+func GetDefaultCachePath(globPatterns []string) string {
+	sort.Strings(globPatterns)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "unknown"
+	}
+
+	combined := fmt.Sprintf("%s:%s", cwd, strings.Join(globPatterns, ";"))
+
+	hasher := sha256.New()
+	hasher.Write([]byte(combined))
+	hash := hex.EncodeToString(hasher.Sum(nil))[:16]
 
 	cacheDir := filepath.Join(os.Getenv("HOME"), ".cache", "ai-rag")
 	os.MkdirAll(cacheDir, 0755)
 
-	return filepath.Join(cacheDir, fmt.Sprintf("embeddings_%s.gob", safe))
+	return filepath.Join(cacheDir, fmt.Sprintf("rag_%s.gob", hash))
 }
 
-func (e *Engine) IngestGlob(ctx context.Context, globPattern string) error {
-	files := findFiles(globPattern)
+func (e *Engine) IngestGlobs(ctx context.Context, globPatterns []string) error {
+	files := findFiles(globPatterns)
 	if len(files) == 0 {
-		return fmt.Errorf("no files found matching %s", globPattern)
+		return fmt.Errorf("no files found matching patterns")
 	}
 
 	fmt.Printf("%sRAG: Found %d files. Processing...%s\n", ui.ColorBlue, len(files), ui.ColorReset)
@@ -372,11 +370,14 @@ func (e *Engine) IngestGlob(ctx context.Context, globPattern string) error {
 			fmt.Printf("\rSkipping %s: %v", file, err)
 			continue
 		}
-		if strings.TrimSpace(content) == "" {
+
+		content = cleanText(content)
+
+		if content == "" {
 			continue
 		}
 
-		chunks := chunkText(content, 1000, 200)
+		chunks := chunkText(content, 800, 100)
 		for _, c := range chunks {
 			textsToEmbed = append(textsToEmbed, c)
 			mapIndexToMeta = append(mapIndexToMeta, struct {
@@ -409,6 +410,10 @@ func (e *Engine) IngestGlob(ctx context.Context, globPattern string) error {
 		}
 
 		for j, vec := range vectors {
+			if len(vec) == 0 {
+				continue
+			}
+
 			meta := mapIndexToMeta[i+j]
 			e.Chunks = append(e.Chunks, Chunk{
 				Text:     meta.Text,
@@ -430,7 +435,7 @@ func (e *Engine) Search(ctx context.Context, query string, topK int) ([]Chunk, e
 	if err != nil {
 		return nil, err
 	}
-	if len(vectors) == 0 {
+	if len(vectors) == 0 || len(vectors[0]) == 0 {
 		return nil, fmt.Errorf("failed to embed query")
 	}
 
@@ -463,30 +468,58 @@ func (e *Engine) Search(ctx context.Context, query string, topK int) ([]Chunk, e
 	return results, nil
 }
 
-func findFiles(pattern string) []string {
+func findFiles(patterns []string) []string {
 	var files []string
-	if strings.Contains(pattern, "**") {
-		parts := strings.Split(pattern, "**")
-		rootDir := "."
-		if parts[0] != "" {
-			rootDir = parts[0]
-		}
-		suffix := strings.TrimPrefix(pattern, rootDir)
-		suffix = strings.TrimPrefix(suffix, "**")
-		suffix = strings.TrimPrefix(suffix, string(filepath.Separator))
+	seen := make(map[string]bool)
 
-		filepath.WalkDir(rootDir, func(path string, d fs.DirEntry, err error) error {
-			if err == nil && !d.IsDir() {
-				match, _ := filepath.Match(suffix, filepath.Base(path))
-				if suffix == "" || match || strings.HasSuffix(filepath.Base(path), strings.TrimPrefix(suffix, "*")) {
-					files = append(files, path)
+	var expandedPatterns []string
+	for _, p := range patterns {
+		if s := strings.Index(p, "{"); s != -1 {
+			if e := strings.LastIndex(p, "}"); e != -1 && e > s {
+				prefix := p[:s]
+				suffix := p[e+1:]
+				opts := strings.Split(p[s+1:e], ",")
+				for _, o := range opts {
+					expandedPatterns = append(expandedPatterns, prefix+strings.TrimSpace(o)+suffix)
+				}
+				continue
+			}
+		}
+		expandedPatterns = append(expandedPatterns, p)
+	}
+
+	for _, pattern := range expandedPatterns {
+		if strings.Contains(pattern, "**") {
+			parts := strings.Split(pattern, "**")
+			rootDir := "."
+			if parts[0] != "" {
+				rootDir = parts[0]
+			}
+			suffix := strings.TrimPrefix(pattern, rootDir)
+			suffix = strings.TrimPrefix(suffix, "**")
+			suffix = strings.TrimPrefix(suffix, string(filepath.Separator))
+
+			filepath.WalkDir(rootDir, func(path string, d fs.DirEntry, err error) error {
+				if err == nil && !d.IsDir() {
+					match, _ := filepath.Match(suffix, filepath.Base(path))
+					if suffix == "" || match || strings.HasSuffix(filepath.Base(path), strings.TrimPrefix(suffix, "*")) {
+						if !seen[path] {
+							files = append(files, path)
+							seen[path] = true
+						}
+					}
+				}
+				return nil
+			})
+		} else {
+			f, _ := filepath.Glob(pattern)
+			for _, file := range f {
+				if !seen[file] {
+					files = append(files, file)
+					seen[file] = true
 				}
 			}
-			return nil
-		})
-	} else {
-		f, _ := filepath.Glob(pattern)
-		files = f
+		}
 	}
 	return files
 }
@@ -526,6 +559,26 @@ func chunkText(text string, chunkSize, overlap int) []string {
 	return chunks
 }
 
+func cleanText(s string) string {
+	s = strings.ReplaceAll(s, "\t", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+
+	reNewlines := regexp.MustCompile(`\n{2,}`)
+	s = reNewlines.ReplaceAllString(s, "\n")
+
+	reSpaces := regexp.MustCompile(` {2,}`)
+	s = reSpaces.ReplaceAllString(s, " ")
+
+	s = strings.Map(func(r rune) rune {
+		if r < 32 && r != '\n' {
+			return -1
+		}
+		return r
+	}, s)
+
+	return strings.TrimSpace(s)
+}
+
 func extractText(path string) (text string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -560,6 +613,8 @@ func extractText(path string) (text string, err error) {
 		return sb.String(), nil
 	case ".docx":
 		return parseDocx(path)
+	case ".xlsx":
+		return parseXlsx(path)
 	case ".epub":
 		rc, err := epub.OpenReader(path)
 		if err != nil {
@@ -581,6 +636,12 @@ func extractText(path string) (text string, err error) {
 			}
 		}
 		return sb.String(), nil
+	case ".fb2":
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		return stripTags(string(b)), nil
 	}
 	return "", fmt.Errorf("unsupported type: %s", ext)
 }
@@ -612,6 +673,38 @@ func parseDocx(path string) (string, error) {
 					sb.WriteString(" ")
 				}
 				if se, ok := t.(xml.StartElement); ok && (se.Name.Local == "p" || se.Name.Local == "br") {
+					sb.WriteString("\n")
+				}
+			}
+		}
+	}
+	return sb.String(), nil
+}
+
+func parseXlsx(path string) (string, error) {
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
+	var sb strings.Builder
+	for _, f := range r.File {
+		if f.Name == "xl/sharedStrings.xml" {
+			rc, err := f.Open()
+			if err != nil {
+				return "", err
+			}
+			defer rc.Close()
+			dec := xml.NewDecoder(rc)
+			for {
+				t, _ := dec.Token()
+				if t == nil {
+					break
+				}
+				if se, ok := t.(xml.StartElement); ok && (se.Name.Local == "t") {
+					var s string
+					dec.DecodeElement(&s, &se)
+					sb.WriteString(s)
 					sb.WriteString("\n")
 				}
 			}

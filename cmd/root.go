@@ -22,9 +22,9 @@ var (
 	memoryFlag      bool
 	stepsFlag       int
 	temperatureFlag float32
-	localEmbFlag    bool
 	mcpFlags        []string
-	ragFlag         string
+	ragFlags        []string
+	ragTopKFlag     int
 	saveSessionFlag string
 	loadSessionFlag string
 	voiceFlag       bool
@@ -36,21 +36,11 @@ var rootCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		cfg := config.Load()
 
-		if cfg.ApiKey == "" && !localEmbFlag {
-			if !strings.Contains(cfg.BaseURL, "localhost") {
-				fmt.Fprintf(os.Stderr, "%sError: AI_API_KEY not set.%s\n", ui.ColorRed, ui.ColorReset)
-				os.Exit(1)
-			}
-		}
-
 		cfg.MaxSteps = stepsFlag
 		cfg.RetainHistory = memoryFlag
 		cfg.Temperature = temperatureFlag
-		cfg.RagGlob = ragFlag
-
-		if localEmbFlag {
-			cfg.EmbeddingProvider = "local"
-		}
+		cfg.RagGlobs = ragFlags
+		cfg.RagTopK = ragTopKFlag
 
 		aiAgent, err := agent.New(cfg, agentFlag, mcpFlags)
 		if err != nil {
@@ -79,7 +69,7 @@ var rootCmd = &cobra.Command{
 
 		ctx := context.Background()
 
-		if ragFlag != "" {
+		if len(ragFlags) > 0 {
 			if err := aiAgent.InitializeRAG(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "%sRAG Initialization Error: %v%s\n", ui.ColorRed, err, ui.ColorReset)
 				os.Exit(1)
@@ -214,8 +204,8 @@ func Execute() {
 	rootCmd.Flags().IntVar(&stepsFlag, "steps", 10, "Maximum number of agentic steps allowed")
 	rootCmd.Flags().Float32VarP(&temperatureFlag, "temperature", "t", 1.0, "Set model temperature (0.0 - 2.0)")
 	rootCmd.Flags().StringArrayVar(&mcpFlags, "mcp", []string{}, "Command to start an MCP server")
-	rootCmd.Flags().StringVar(&ragFlag, "rag", "", "Glob pattern for RAG documents")
-	rootCmd.Flags().BoolVar(&localEmbFlag, "local-rag", false, "Use local in-memory embedding model (downloads on first run)")
+	rootCmd.Flags().StringArrayVar(&ragFlags, "rag", []string{}, "Glob patterns for RAG documents (can be used multiple times)")
+	rootCmd.Flags().IntVar(&ragTopKFlag, "rag-top", 3, "Number of RAG context chunks to retrieve")
 	rootCmd.Flags().StringVar(&saveSessionFlag, "save-session", "", "Save chat history to a Markdown file")
 	rootCmd.Flags().StringVar(&loadSessionFlag, "session", "", "Load chat history from a Markdown file")
 	rootCmd.Flags().BoolVar(&voiceFlag, "voice", false, "Enable voice interaction (requires --interactive)")

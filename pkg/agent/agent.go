@@ -70,7 +70,7 @@ func New(cfg config.Config, agenticMode bool, mcpServers []string) (*Agent, erro
 		}
 	}
 
-	ragEngine, err := rag.New(client, cfg.EmbeddingProvider, cfg.EmbeddingModel)
+	ragEngine, err := rag.New()
 	if err != nil {
 		return nil, fmt.Errorf("failed to init RAG engine: %w", err)
 	}
@@ -176,16 +176,16 @@ func (a *Agent) LoadSession(filename string) error {
 }
 
 func (a *Agent) InitializeRAG(ctx context.Context) error {
-	if a.config.RagGlob == "" {
+	if len(a.config.RagGlobs) == 0 {
 		return nil
 	}
 
-	cachePath := rag.GetDefaultCachePath(a.config.RagGlob)
+	cachePath := rag.GetDefaultCachePath(a.config.RagGlobs)
 
 	if a.RagEngine.CacheExists(cachePath) {
 		fmt.Printf("%sFound embedding cache, validating...%s\n", ui.ColorBlue, ui.ColorReset)
 
-		valid, reason := a.RagEngine.ValidateCache(cachePath, a.config.RagGlob)
+		valid, reason := a.RagEngine.ValidateCache(cachePath, a.config.RagGlobs)
 
 		if valid {
 			fmt.Printf("%sCache is valid, loading...%s\n", ui.ColorGreen, ui.ColorReset)
@@ -202,11 +202,11 @@ func (a *Agent) InitializeRAG(ctx context.Context) error {
 		fmt.Printf("%sNo cache found, generating embeddings...%s\n", ui.ColorBlue, ui.ColorReset)
 	}
 
-	if err := a.RagEngine.IngestGlob(ctx, a.config.RagGlob); err != nil {
+	if err := a.RagEngine.IngestGlobs(ctx, a.config.RagGlobs); err != nil {
 		return err
 	}
 
-	if err := a.RagEngine.SaveEmbeddings(cachePath, a.config.RagGlob, a.config.EmbeddingProvider, a.config.EmbeddingModel); err != nil {
+	if err := a.RagEngine.SaveEmbeddings(cachePath, a.config.RagGlobs); err != nil {
 		fmt.Printf("%sWarning: Failed to save cache: %v%s\n", ui.ColorRed, err, ui.ColorReset)
 	}
 
@@ -298,10 +298,10 @@ func (a *Agent) runTurnInternal(ctx context.Context, prompt string, printFn func
 
 	finalPrompt := prompt
 
-	if a.config.RagGlob != "" && len(a.RagEngine.Chunks) > 0 {
+	if len(a.config.RagGlobs) > 0 && len(a.RagEngine.Chunks) > 0 {
 		searchQuery := a.generateSearchKeywords(ctx, prompt)
 
-		results, err := a.RagEngine.Search(ctx, searchQuery, 3)
+		results, err := a.RagEngine.Search(ctx, searchQuery, a.config.RagTopK)
 		if err != nil {
 			fmt.Printf("%sRAG Search Error: %v%s\n", ui.ColorRed, err, ui.ColorReset)
 		} else if len(results) > 0 {
