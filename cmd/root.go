@@ -76,19 +76,19 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		if interactiveFlag {
-			if voiceFlag {
-				startVoiceInteractive(ctx, aiAgent)
-			} else {
-				startInteractive(ctx, aiAgent)
-			}
-			return
-		}
-
 		prompt, err := ui.GatherInput(args, editorFlag, cfg.Editor)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Input error: %v\n", err)
 			os.Exit(1)
+		}
+
+		if interactiveFlag {
+			if voiceFlag {
+				startVoiceInteractive(ctx, aiAgent, prompt)
+			} else {
+				startInteractive(ctx, aiAgent, prompt)
+			}
+			return
 		}
 
 		if strings.TrimSpace(prompt) == "" {
@@ -103,9 +103,38 @@ var rootCmd = &cobra.Command{
 	},
 }
 
-func startInteractive(ctx context.Context, ai *agent.Agent) {
+func getInteractiveInput() (*os.File, error) {
+	if ui.IsStdinPiped() {
+		f, err := os.Open("/dev/tty")
+		if err != nil {
+			return nil, fmt.Errorf("failed to open /dev/tty for interactive mode (was stdin piped?): %w", err)
+		}
+		return f, nil
+	}
+	return os.Stdin, nil
+}
+
+func startInteractive(ctx context.Context, ai *agent.Agent, initialCtx string) {
 	fmt.Println("Interactive Mode. Type 'exit' to quit.")
-	scanner := bufio.NewScanner(os.Stdin)
+
+	inputFile, err := getInteractiveInput()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return
+	}
+	defer func() {
+		if inputFile != os.Stdin {
+			inputFile.Close()
+		}
+	}()
+
+	if memoryFlag && strings.TrimSpace(initialCtx) != "" {
+		ai.AddContext(initialCtx)
+		fmt.Printf("%s[Loaded initial context into memory]%s\n", ui.ColorGreen, ui.ColorReset)
+		initialCtx = ""
+	}
+
+	scanner := bufio.NewScanner(inputFile)
 	for {
 		fmt.Printf("\n%s>> %s", ui.ColorBlue, ui.ColorReset)
 		if !scanner.Scan() {
@@ -115,13 +144,20 @@ func startInteractive(ctx context.Context, ai *agent.Agent) {
 		if text == "exit" || text == "quit" {
 			break
 		}
-		if err := ai.RunTurn(ctx, text, true); err != nil {
+
+		finalPrompt := text
+
+		if !memoryFlag && initialCtx != "" {
+			finalPrompt = fmt.Sprintf("CONTEXT:\n%s\n\nUSER QUERY:\n%s", initialCtx, text)
+		}
+
+		if err := ai.RunTurn(ctx, finalPrompt, true); err != nil {
 			fmt.Printf("Error: %v\n", err)
 		}
 	}
 }
 
-func startVoiceInteractive(ctx context.Context, ai *agent.Agent) {
+func startVoiceInteractive(ctx context.Context, ai *agent.Agent, initialCtx string) {
 	fmt.Println("Voice Mode Enabled.")
 	fmt.Println("Press SPACE to start recording. Press SPACE again to stop and send.")
 	fmt.Println("Press Ctrl+C to quit.")
@@ -133,14 +169,30 @@ func startVoiceInteractive(ctx context.Context, ai *agent.Agent) {
 	}
 	defer vm.Close()
 
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	inputFile, err := getInteractiveInput()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return
+	}
+	defer func() {
+		if inputFile != os.Stdin {
+			inputFile.Close()
+		}
+	}()
+
+	oldState, err := term.MakeRaw(int(inputFile.Fd()))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to set raw terminal: %v\n", err)
 		os.Exit(1)
 	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
+	defer term.Restore(int(inputFile.Fd()), oldState)
 
-	screenReader := bufio.NewReader(os.Stdin)
+	screenReader := bufio.NewReader(inputFile)
+
+	if memoryFlag && strings.TrimSpace(initialCtx) != "" {
+		ai.AddContext(initialCtx)
+		initialCtx = ""
+	}
 
 	for {
 		fmt.Printf("\r\033[K[WAITING] Press SPACE to speak...")
@@ -178,11 +230,16 @@ func startVoiceInteractive(ctx context.Context, ai *agent.Agent) {
 			continue
 		}
 
-		term.Restore(int(os.Stdin.Fd()), oldState)
+		term.Restore(int(inputFile.Fd()), oldState)
 		fmt.Printf("\r\033[K\n%sYou (Voice): %s%s\n", ui.ColorBlue, text, ui.ColorReset)
 
-		response, err := ai.RunTurnCapture(ctx, text)
-		term.MakeRaw(int(os.Stdin.Fd()))
+		finalPrompt := text
+		if !memoryFlag && initialCtx != "" {
+			finalPrompt = fmt.Sprintf("CONTEXT:\n%s\n\nUSER QUERY:\n%s", initialCtx, text)
+		}
+
+		response, err := ai.RunTurnCapture(ctx, finalPrompt)
+		term.MakeRaw(int(inputFile.Fd()))
 
 		if err != nil {
 			fmt.Printf("Agent Error: %v\n", err)

@@ -94,6 +94,13 @@ func New(cfg config.Config, agenticMode bool, mcpServers []string) (*Agent, erro
 	return agent, nil
 }
 
+func (a *Agent) AddContext(content string) {
+	a.history = append(a.history, openai.ChatCompletionMessage{
+		Role:    openai.ChatMessageRoleUser,
+		Content: content,
+	})
+}
+
 func (a *Agent) SaveSession(filename string) error {
 	f, err := os.Create(filename)
 	if err != nil {
