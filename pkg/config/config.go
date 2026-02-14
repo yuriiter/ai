@@ -17,6 +17,7 @@ type Config struct {
 	Temperature        float32
 	RagGlobs           []string
 	RagTopK            int
+	ContextGlobs       []string
 }
 
 func Load() Config {

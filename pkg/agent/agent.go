@@ -94,6 +94,36 @@ func New(cfg config.Config, agenticMode bool, mcpServers []string) (*Agent, erro
 	return agent, nil
 }
 
+func (a *Agent) LoadContextFiles(ctx context.Context, globs []string) error {
+	if len(globs) == 0 {
+		return nil
+	}
+	files := rag.FindFiles(globs)
+	if len(files) == 0 {
+		return fmt.Errorf("no files found matching globs: %v", globs)
+	}
+
+	fmt.Printf("%sLoading context from %d files...%s\n", ui.ColorBlue, len(files), ui.ColorReset)
+
+	var sb strings.Builder
+	sb.WriteString("CONTEXT FROM FILES:\n\n")
+
+	for _, file := range files {
+		content, err := rag.ExtractText(file)
+		if err != nil {
+			fmt.Printf("Warning: Failed to read %s: %v\n", file, err)
+			continue
+		}
+		if strings.TrimSpace(content) == "" {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("--- FILE: %s ---\n%s\n\n", file, content))
+	}
+
+	a.AddContext(sb.String())
+	return nil
+}
+
 func (a *Agent) AddContext(content string) {
 	a.history = append(a.history, openai.ChatCompletionMessage{
 		Role:    openai.ChatMessageRoleUser,

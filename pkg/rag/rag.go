@@ -230,7 +230,7 @@ func (e *Engine) ValidateCache(cachePath string, globPatterns []string) (bool, s
 		}
 	}
 
-	currentFiles := findFiles(globPatterns)
+	currentFiles := FindFiles(globPatterns)
 	if len(currentFiles) == 0 {
 		return false, "no files found matching patterns"
 	}
@@ -264,7 +264,7 @@ func (e *Engine) ValidateCache(cachePath string, globPatterns []string) (bool, s
 }
 
 func (e *Engine) SaveEmbeddings(filepath string, globPatterns []string) error {
-	files := findFiles(globPatterns)
+	files := FindFiles(globPatterns)
 	metadata, err := getFileMetadata(files)
 	if err != nil {
 		return fmt.Errorf("failed to get file metadata: %w", err)
@@ -351,7 +351,7 @@ func GetDefaultCachePath(globPatterns []string) string {
 }
 
 func (e *Engine) IngestGlobs(ctx context.Context, globPatterns []string) error {
-	files := findFiles(globPatterns)
+	files := FindFiles(globPatterns)
 	if len(files) == 0 {
 		return fmt.Errorf("no files found matching patterns")
 	}
@@ -365,7 +365,7 @@ func (e *Engine) IngestGlobs(ctx context.Context, globPatterns []string) error {
 	}
 
 	for i, file := range files {
-		content, err := extractText(file)
+		content, err := ExtractText(file)
 		if err != nil {
 			fmt.Printf("\rSkipping %s: %v", file, err)
 			continue
@@ -468,7 +468,7 @@ func (e *Engine) Search(ctx context.Context, query string, topK int) ([]Chunk, e
 	return results, nil
 }
 
-func findFiles(patterns []string) []string {
+func FindFiles(patterns []string) []string {
 	var files []string
 	seen := make(map[string]bool)
 
@@ -579,7 +579,7 @@ func cleanText(s string) string {
 	return strings.TrimSpace(s)
 }
 
-func extractText(path string) (text string, err error) {
+func ExtractText(path string) (text string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic recovering file %s: %v", path, r)

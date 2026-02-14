@@ -28,6 +28,7 @@ var (
 	saveSessionFlag string
 	loadSessionFlag string
 	voiceFlag       bool
+	globFlags       []string
 )
 
 var rootCmd = &cobra.Command{
@@ -41,6 +42,7 @@ var rootCmd = &cobra.Command{
 		cfg.Temperature = temperatureFlag
 		cfg.RagGlobs = ragFlags
 		cfg.RagTopK = ragTopKFlag
+		cfg.ContextGlobs = globFlags
 
 		aiAgent, err := agent.New(cfg, agentFlag, mcpFlags)
 		if err != nil {
@@ -48,6 +50,15 @@ var rootCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		defer aiAgent.Close()
+
+		ctx := context.Background()
+
+		if len(globFlags) > 0 {
+			if err := aiAgent.LoadContextFiles(ctx, globFlags); err != nil {
+				fmt.Fprintf(os.Stderr, "%sError loading context files: %v%s\n", ui.ColorRed, err, ui.ColorReset)
+				os.Exit(1)
+			}
+		}
 
 		if loadSessionFlag != "" {
 			if err := aiAgent.LoadSession(loadSessionFlag); err != nil {
@@ -66,8 +77,6 @@ var rootCmd = &cobra.Command{
 				}
 			}()
 		}
-
-		ctx := context.Background()
 
 		if len(ragFlags) > 0 {
 			if err := aiAgent.InitializeRAG(ctx); err != nil {
@@ -266,6 +275,7 @@ func Execute() {
 	rootCmd.Flags().StringVar(&saveSessionFlag, "save-session", "", "Save chat history to a Markdown file")
 	rootCmd.Flags().StringVar(&loadSessionFlag, "session", "", "Load chat history from a Markdown file")
 	rootCmd.Flags().BoolVar(&voiceFlag, "voice", false, "Enable voice interaction (requires --interactive)")
+	rootCmd.Flags().StringArrayVar(&globFlags, "glob", []string{}, "Glob patterns to include files as context")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
