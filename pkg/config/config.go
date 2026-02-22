@@ -10,6 +10,7 @@ type Config struct {
 	ApiKey             string
 	BaseURL            string
 	Model              string
+	ImageModel         string
 	Editor             string
 	SystemInstructions string
 	MaxSteps           int
@@ -18,6 +19,9 @@ type Config struct {
 	RagGlobs           []string
 	RagTopK            int
 	ContextGlobs       []string
+	AttachGlobs        []string
+	GenerateImage      string
+	ImageSize          string
 }
 
 func Load() Config {
@@ -25,6 +29,7 @@ func Load() Config {
 		ApiKey:             os.Getenv("OPENAI_API_KEY"),
 		BaseURL:            os.Getenv("OPENAI_BASE_URL"),
 		Model:              os.Getenv("OPENAI_MODEL"),
+		ImageModel:         os.Getenv("OPENAI_IMAGE_MODEL"),
 		Editor:             os.Getenv("EDITOR"),
 		SystemInstructions: os.Getenv("OPENAI_SYSTEM_INSTRUCTIONS"),
 		MaxSteps:           10,
@@ -33,7 +38,11 @@ func Load() Config {
 	}
 
 	if c.Model == "" {
-		c.Model = "gpt-4o"
+		c.Model = "gemini-3-flash-preview"
+	}
+
+	if c.ImageModel == "" {
+		c.ImageModel = "gemini-2.5-flash-image"
 	}
 
 	if val := os.Getenv("OPENAI_TEMPERATURE"); val != "" {

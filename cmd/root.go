@@ -4,36 +4,39 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"os"
+	"strings"
+
+	"github.com/spf13/cobra"
 	"github.com/yuriiter/ai/pkg/agent"
 	"github.com/yuriiter/ai/pkg/config"
 	"github.com/yuriiter/ai/pkg/ui"
 	"github.com/yuriiter/ai/pkg/voice"
 	"golang.org/x/term"
-	"os"
-	"strings"
-
-	"github.com/spf13/cobra"
 )
 
 var (
-	editorFlag      bool
-	interactiveFlag bool
-	agentFlag       bool
-	memoryFlag      bool
-	stepsFlag       int
-	temperatureFlag float32
-	mcpFlags        []string
-	ragFlags        []string
-	ragTopKFlag     int
-	saveSessionFlag string
-	loadSessionFlag string
-	voiceFlag       bool
-	globFlags       []string
+	editorFlag        bool
+	interactiveFlag   bool
+	agentFlag         bool
+	memoryFlag        bool
+	stepsFlag         int
+	temperatureFlag   float32
+	mcpFlags          []string
+	ragFlags          []string
+	ragTopKFlag       int
+	saveSessionFlag   string
+	loadSessionFlag   string
+	voiceFlag         bool
+	globFlags         []string
+	attachFlags       []string
+	generateImageFlag string
+	imageSizeFlag     string
 )
 
 var rootCmd = &cobra.Command{
 	Use:   "ai [prompt...]",
-	Short: "A CLI AI Agent with optional MCP and RAG support",
+	Short: "A CLI AI Agent with optional MCP, RAG, and Image Generation support",
 	Run: func(cmd *cobra.Command, args []string) {
 		cfg := config.Load()
 
@@ -43,6 +46,9 @@ var rootCmd = &cobra.Command{
 		cfg.RagGlobs = ragFlags
 		cfg.RagTopK = ragTopKFlag
 		cfg.ContextGlobs = globFlags
+		cfg.AttachGlobs = attachFlags
+		cfg.GenerateImage = generateImageFlag
+		cfg.ImageSize = imageSizeFlag
 
 		aiAgent, err := agent.New(cfg, agentFlag, mcpFlags)
 		if err != nil {
@@ -52,6 +58,24 @@ var rootCmd = &cobra.Command{
 		defer aiAgent.Close()
 
 		ctx := context.Background()
+
+		if generateImageFlag != "" {
+			prompt, err := ui.GatherInput(args, editorFlag, cfg.Editor)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Input error: %v\n", err)
+				os.Exit(1)
+			}
+			if strings.TrimSpace(prompt) == "" {
+				fmt.Fprintf(os.Stderr, "%sPrompt is required to generate an image.%s\n", ui.ColorRed, ui.ColorReset)
+				os.Exit(1)
+			}
+
+			if err := aiAgent.GenerateImage(ctx, prompt, generateImageFlag); err != nil {
+				fmt.Fprintf(os.Stderr, "\n%sImage Generation Error: %v%s\n", ui.ColorRed, err, ui.ColorReset)
+				os.Exit(1)
+			}
+			return
+		}
 
 		if len(globFlags) > 0 {
 			if err := aiAgent.LoadContextFiles(ctx, globFlags); err != nil {
@@ -276,6 +300,10 @@ func Execute() {
 	rootCmd.Flags().StringVar(&loadSessionFlag, "session", "", "Load chat history from a Markdown file")
 	rootCmd.Flags().BoolVar(&voiceFlag, "voice", false, "Enable voice interaction (requires --interactive)")
 	rootCmd.Flags().StringArrayVar(&globFlags, "glob", []string{}, "Glob patterns to include files as context")
+
+	rootCmd.Flags().StringArrayVar(&attachFlags, "attach", []string{}, "Glob patterns for files to attach to the request (images, documents, etc.)")
+	rootCmd.Flags().StringVar(&generateImageFlag, "generate-image", "", "Generate an image instead of text and save it to this path")
+	rootCmd.Flags().StringVar(&imageSizeFlag, "image-size", "1:1", "Target size/aspect ratio for the generated image (e.g., 16:9, 1:1)")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
