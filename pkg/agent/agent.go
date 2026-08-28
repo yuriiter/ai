@@ -77,18 +77,12 @@ func New(cfg config.Config, agenticMode bool, mcpServers []string) (*Agent, erro
 		}
 	}
 
-	ragEngine, err := rag.New()
-	if err != nil {
-		return nil, fmt.Errorf("failed to init RAG engine: %w", err)
-	}
-
 	agent := &Agent{
 		client:      client,
 		config:      cfg,
 		history:     make([]openai.ChatCompletionMessage, 0),
 		Registry:    reg,
 		agenticMode: agenticMode,
-		RagEngine:   ragEngine,
 	}
 
 	if sysPrompt != "" {
@@ -358,6 +352,14 @@ func (a *Agent) InitializeRAG(ctx context.Context) error {
 		return nil
 	}
 
+	if a.RagEngine == nil {
+		ragEngine, err := rag.New()
+		if err != nil {
+			return fmt.Errorf("failed to init RAG engine: %w", err)
+		}
+		a.RagEngine = ragEngine
+	}
+
 	cachePath := rag.GetDefaultCachePath(a.config.RagGlobs)
 
 	if a.RagEngine.CacheExists(cachePath) {
@@ -478,7 +480,7 @@ func (a *Agent) runTurnInternal(ctx context.Context, prompt string, printFn func
 
 	finalPrompt := prompt
 
-	if len(a.config.RagGlobs) > 0 && len(a.RagEngine.Chunks) > 0 {
+	if a.RagEngine != nil && len(a.config.RagGlobs) > 0 && len(a.RagEngine.Chunks) > 0 {
 		searchQuery := a.generateSearchKeywords(ctx, prompt)
 
 		results, err := a.RagEngine.Search(ctx, searchQuery, a.config.RagTopK)
