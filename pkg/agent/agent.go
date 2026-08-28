@@ -549,16 +549,10 @@ func (a *Agent) runTurnInternal(ctx context.Context, prompt string, printFn func
 			}
 		}
 
-		resp, err := a.client.CreateChatCompletion(ctx, req)
+		msg, err := a.streamChatCompletion(ctx, req, printFn)
 		if err != nil {
 			return fmt.Errorf("api error: %w", err)
 		}
-
-		if len(resp.Choices) == 0 {
-			return fmt.Errorf("api returned empty response (no choices)")
-		}
-
-		msg := resp.Choices[0].Message
 		a.history = append(a.history, msg)
 
 		if len(msg.ToolCalls) > 0 && a.agenticMode {
@@ -588,9 +582,85 @@ func (a *Agent) runTurnInternal(ctx context.Context, prompt string, printFn func
 			continue
 		}
 
-		printFn(msg.Content + "\n")
+		printFn("\n")
 		return nil
 	}
 
 	return errors.New("agent step limit reached")
+}
+
+func (a *Agent) streamChatCompletion(ctx context.Context, req openai.ChatCompletionRequest, printFn func(string)) (openai.ChatCompletionMessage, error) {
+	stream, err := a.client.CreateChatCompletionStream(ctx, req)
+	if err != nil {
+		return openai.ChatCompletionMessage{}, err
+	}
+	defer stream.Close()
+
+	var fullMsg openai.ChatCompletionMessage
+	var contentBuilder strings.Builder
+	toolCallsMap := make(map[int]*openai.ToolCall)
+
+	for {
+		response, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return openai.ChatCompletionMessage{}, err
+		}
+		if len(response.Choices) == 0 {
+			continue
+		}
+
+		delta := response.Choices[0].Delta
+
+		if delta.Role != "" {
+			fullMsg.Role = delta.Role
+		}
+
+		if delta.Content != "" {
+			contentBuilder.WriteString(delta.Content)
+			printFn(delta.Content)
+		}
+
+		for _, tc := range delta.ToolCalls {
+			idx := 0
+			if tc.Index != nil {
+				idx = *tc.Index
+			}
+			existing, ok := toolCallsMap[idx]
+			if !ok {
+				existing = &openai.ToolCall{
+					ID:   tc.ID,
+					Type: tc.Type,
+				}
+				toolCallsMap[idx] = existing
+			}
+			if tc.ID != "" {
+				existing.ID = tc.ID
+			}
+			if tc.Type != "" {
+				existing.Type = tc.Type
+			}
+			if tc.Function.Name != "" {
+				existing.Function.Name += tc.Function.Name
+			}
+			existing.Function.Arguments += tc.Function.Arguments
+		}
+	}
+
+	if fullMsg.Role == "" {
+		fullMsg.Role = openai.ChatMessageRoleAssistant
+	}
+	fullMsg.Content = contentBuilder.String()
+
+	for i := 0; ; i++ {
+		tc, ok := toolCallsMap[i]
+		if !ok {
+			break
+		}
+		fullMsg.ToolCalls = append(fullMsg.ToolCalls, *tc)
+	}
+
+	return fullMsg, nil
 }
