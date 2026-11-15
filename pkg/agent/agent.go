@@ -602,6 +602,14 @@ func (a *Agent) streamChatCompletion(ctx context.Context, req openai.ChatComplet
 	var contentBuilder strings.Builder
 	toolCallsMap := make(map[int]*openai.ToolCall)
 
+	thinkingOpen := false
+	closeThinking := func() {
+		if thinkingOpen {
+			fmt.Printf("%s\n", ui.ColorReset)
+			thinkingOpen = false
+		}
+	}
+
 	for {
 		response, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
@@ -620,7 +628,16 @@ func (a *Agent) streamChatCompletion(ctx context.Context, req openai.ChatComplet
 			fullMsg.Role = delta.Role
 		}
 
+		if delta.ReasoningContent != "" {
+			if !thinkingOpen {
+				ui.PrintThinkingStart()
+				thinkingOpen = true
+			}
+			ui.PrintThinking(delta.ReasoningContent)
+		}
+
 		if delta.Content != "" {
+			closeThinking()
 			contentBuilder.WriteString(delta.Content)
 			printFn(delta.Content)
 		}
@@ -650,6 +667,8 @@ func (a *Agent) streamChatCompletion(ctx context.Context, req openai.ChatComplet
 			existing.Function.Arguments += tc.Function.Arguments
 		}
 	}
+
+	closeThinking()
 
 	if fullMsg.Role == "" {
 		fullMsg.Role = openai.ChatMessageRoleAssistant

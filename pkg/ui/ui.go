@@ -12,12 +12,13 @@ var (
 	ColorRed   = "\033[31m"
 	ColorGreen = "\033[32m"
 	ColorBlue  = "\033[34m"
+	ColorDim   = "\033[90m"
 	ColorReset = "\033[0m"
 )
 
 func init() {
 	if !IsStdoutTTY() {
-		ColorRed, ColorGreen, ColorBlue, ColorReset = "", "", "", ""
+		ColorRed, ColorGreen, ColorBlue, ColorDim, ColorReset = "", "", "", "", ""
 	}
 }
 
@@ -93,6 +94,14 @@ func PrintUserPrompt(prompt string) {
 
 func PrintAgentMessage(msg string) {
 	fmt.Printf("%s%s%s", ColorGreen, msg, ColorReset)
+}
+
+func PrintThinkingStart() {
+	fmt.Printf("%s[Thinking]%s\n", ColorDim, ColorReset)
+}
+
+func PrintThinking(msg string) {
+	fmt.Printf("%s%s%s", ColorDim, msg, ColorReset)
 }
 
 func PrintToolUse(toolName string, args string) {
